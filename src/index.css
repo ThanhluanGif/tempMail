@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    font-family: var(--font-sans);
+    color: #1d1d1f;
+    background-color: #eceff4;
+  }
+}
+
+.macos-wallpaper {
+  background:
+    radial-gradient(circle at 12% 18%, rgba(210, 217, 236, 0.85) 0%, rgba(210, 217, 236, 0) 48%),
+    radial-gradient(circle at 92% 24%, rgba(236, 206, 216, 0.78) 0%, rgba(236, 206, 216, 0) 44%),
+    radial-gradient(circle at 75% 88%, rgba(196, 212, 234, 0.72) 0%, rgba(196, 212, 234, 0) 45%),
+    linear-gradient(135deg, #d7dce8 0%, #e4e7f0 48%, #d6dbe6 100%);
+}
+
+/* Subtle macOS-style thin scrollbars */
+.thin-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.thin-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.thin-scroll::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.22);
+  border-radius: 9999px;
+}
+
+.thin-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.4);
+}

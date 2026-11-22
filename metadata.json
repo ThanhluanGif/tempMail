@@ -1,0 +1,8 @@
+{
+  "name": "TempMail — Hộp thư tạm thời",
+  "description": "Ứng dụng tạo địa chỉ email tạm thời dùng một lần an toàn, ẩn danh, tự động nhận thư và phát hiện mã OTP nhanh chóng.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
