@@ -12,6 +12,7 @@ import {
 } from './tempMailLogic';
 import { resolveServerPort, shouldServeStaticDist } from './serverConfig';
 import { onRequest as cfApiHandler } from '../../functions/api/[[path]]';
+import cfWorker from '../../worker';
 
 test('extractOtpCodes detects Meta Vietnamese verification code 620252 and ignores postal code 94025', () => {
   const metaBody = `
@@ -304,4 +305,34 @@ test('Cloudflare Pages Functions handler supports stateless encrypted HttpOnly c
   const unknown = await callCf('GET', '/api/nonexistent');
   assert.equal(unknown.status, 404);
   assert.equal(typeof unknown.json.error, 'string');
+});
+
+test('Cloudflare Worker entry point routes /api/* to edge handler and delegates static paths to ASSETS', async () => {
+  let assetsCalled = false;
+  const mockEnv = {
+    MAILBOX_SESSION_SECRET: 'worker-test-secret',
+    ASSETS: {
+      async fetch(req: Request) {
+        assetsCalled = true;
+        return new Response(`asset:${new URL(req.url).pathname}`, { status: 200 });
+      },
+    },
+  };
+
+  const apiRes = await cfWorker.fetch(
+    new Request('https://tempmail-studio.workers.dev/api/health'),
+    mockEnv
+  );
+  assert.equal(apiRes.status, 200);
+  const apiJson = (await apiRes.json()) as { ok: boolean; runtime: string };
+  assert.equal(apiJson.ok, true);
+  assert.equal(assetsCalled, false);
+
+  const pageRes = await cfWorker.fetch(
+    new Request('https://tempmail-studio.workers.dev/'),
+    mockEnv
+  );
+  assert.equal(pageRes.status, 200);
+  assert.equal(assetsCalled, true);
+  assert.equal(await pageRes.text(), 'asset:/');
 });
