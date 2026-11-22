@@ -124,21 +124,3 @@ export async function deleteMessage(mailboxId: string, messageId: string): Promi
     { method: 'DELETE' }
   );
 }
-
-export async function sendSampleTestEmail(
-  mailboxId: string
-): Promise<{ message: EmailSummary; mailbox: Mailbox }> {
-  const res = await apiRequest<{ message?: EmailSummary; mailbox?: Mailbox }>(
-    `/api/mailboxes/${encodeURIComponent(mailboxId)}/test-email`,
-    { method: 'POST', body: JSON.stringify({}) }
-  );
-  if (
-    !res.message ||
-    typeof res.message.id !== 'string' ||
-    !res.mailbox ||
-    typeof res.mailbox.id !== 'string'
-  ) {
-    throw new Error('Không thể gửi thư thử nghiệm.');
-  }
-  return { message: res.message, mailbox: res.mailbox };
-}

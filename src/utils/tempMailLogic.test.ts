@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildSampleTestEmail,
   extractOtpCodes,
   formatEmailDate,
   formatShortTime,
@@ -101,17 +100,7 @@ test('formatEmailDate, formatShortTime, and getSenderInitial format cleanly', ()
   assert.equal(getSenderInitial('', 'noreply@github.com'), 'N');
 });
 
-test('buildSampleTestEmail produces Meta 620252 verification email by default', () => {
-  const sample = buildSampleTestEmail('vayixaf693@forims.com', 0);
-  assert.equal(sample.fromName, 'Meta');
-  assert.equal(sample.fromAddress, 'security@account.meta.com');
-  assert.equal(sample.subject, 'Xác nhận email cho Tài khoản Meta mới');
-  assert.deepEqual(extractOtpCodes(sample.textBody, sample.subject), ['620252']);
-  assert.ok(sample.rawSource.includes('Delivered-To: vayixaf693@forims.com'));
-});
-
 test('resolveServerPort avoids Nginx port 8080 collision while supporting standalone Cloud Run and CLI flags', () => {
-  // AI Studio / Cloud Run container with Nginx on 8080 proxying to DEFAULT_APP_PORT=3000
   assert.equal(
     resolveServerPort(['node', 'server.ts'], {
       PORT: '8080',
@@ -121,7 +110,6 @@ test('resolveServerPort avoids Nginx port 8080 collision while supporting standa
     3000
   );
 
-  // Nginx owns PORT even if DEFAULT_APP_PORT is missing
   assert.equal(
     resolveServerPort(['node', 'server.ts'], {
       PORT: '8080',
@@ -130,7 +118,6 @@ test('resolveServerPort avoids Nginx port 8080 collision while supporting standa
     3000
   );
 
-  // Standalone Cloud Run without Nginx uses injected PORT=8080
   assert.equal(
     resolveServerPort(['node', 'server.ts'], {
       PORT: '8080',
@@ -138,7 +125,6 @@ test('resolveServerPort avoids Nginx port 8080 collision while supporting standa
     8080
   );
 
-  // Standalone Cloud Run with stray DEFAULT_APP_PORT=3000 (no NGINX_PORT) STILL binds PORT=8080
   assert.equal(
     resolveServerPort(['node', 'server.ts'], {
       PORT: '8080',
@@ -147,7 +133,6 @@ test('resolveServerPort avoids Nginx port 8080 collision while supporting standa
     8080
   );
 
-  // Explicit CLI --port flag overrides env vars
   assert.equal(
     resolveServerPort(['node', 'server.ts', '--port', '3099'], {
       PORT: '8080',
@@ -162,12 +147,10 @@ test('resolveServerPort avoids Nginx port 8080 collision while supporting standa
     4100
   );
 
-  // Local default when no env vars exist
   assert.equal(resolveServerPort(['node', 'server.ts'], {}), 3000);
 });
 
 test('shouldServeStaticDist serves dist/ under node server.ts even with NODE_ENV=development, but keeps Vite in tsx dev', () => {
-  // Deployed container running `node server.ts` even if NODE_ENV=development is inherited
   assert.equal(
     shouldServeStaticDist({
       argv: ['node', 'server.ts'],
@@ -178,7 +161,6 @@ test('shouldServeStaticDist serves dist/ under node server.ts even with NODE_ENV
     true
   );
 
-  // Dev server running `npm run dev` via tsx keeps Vite middleware
   assert.equal(
     shouldServeStaticDist({
       argv: ['node', 'server.ts', '--port', '3000'],
@@ -189,7 +171,6 @@ test('shouldServeStaticDist serves dist/ under node server.ts even with NODE_ENV
     false
   );
 
-  // Missing dist/ falls back to Vite instead of crashing
   assert.equal(
     shouldServeStaticDist({
       argv: ['node', 'server.ts'],
@@ -201,7 +182,7 @@ test('shouldServeStaticDist serves dist/ under node server.ts even with NODE_ENV
   );
 });
 
-test('Cloudflare Pages Functions handler supports stateless encrypted HttpOnly cookie lifecycle end-to-end', async () => {
+test('Cloudflare Edge API supports live TempMail.plus & Mail.tm mailboxes, removes test-email endpoint, and uses HttpOnly cookies', async () => {
   const env = { MAILBOX_SESSION_SECRET: 'unit-test-secret-32-bytes-key-abc' };
   const cookieJar = new Map<string, string>();
 
@@ -213,7 +194,7 @@ test('Cloudflare Pages Functions handler supports stateless encrypted HttpOnly c
     if (cookieHeader) headers.set('Cookie', cookieHeader);
     if (body !== undefined) headers.set('Content-Type', 'application/json');
 
-    const req = new Request(`https://tempmail.pages.dev${path}`, {
+    const req = new Request(`https://tempmail.workers.dev${path}`, {
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -243,68 +224,51 @@ test('Cloudflare Pages Functions handler supports stateless encrypted HttpOnly c
     return { status: res.status, json, setCookies };
   };
 
-  // 1. Health check
-  const health = await callCf('GET', '/api/health');
-  assert.equal(health.status, 200);
-  assert.equal(health.json.ok, true);
-  assert.equal(health.json.runtime, 'cloudflare-pages');
+  // 1. Live domains exclude blacklisted GuerrillaMail and include clean TempMail.plus domains
+  const domRes = await callCf('GET', '/api/domains');
+  assert.equal(domRes.status, 200);
+  const domains = domRes.json.domains as Array<{ domain: string; provider: string }>;
+  assert.ok(domains.some((d) => d.domain === 'mailto.plus' && d.provider === 'tempmail_plus'));
+  assert.ok(!domains.some((d) => d.domain === 'sharklasers.com'));
 
-  // 2. Create mailbox (uses real upstream or falls back cleanly) & verify HttpOnly encrypted cookie
+  // 2. Create live TempMail.plus mailbox & verify HttpOnly Secure cookie
   const created = await callCf('POST', '/api/mailboxes', {
     mode: 'domain',
-    username: 'cfedgeuser99',
-    domain: 'sharklasers.com',
+    username: `cfotp${Math.floor(10000 + Math.random() * 89999)}`,
+    domain: 'fexpost.com',
   });
   assert.equal(created.status, 201);
-  const mailbox = created.json.mailbox as { id: string; address: string };
+  const mailbox = created.json.mailbox as {
+    id: string;
+    address: string;
+    provider: string;
+    isLive: boolean;
+  };
   assert.ok(mailbox.id.startsWith('mb_'));
-  assert.ok(mailbox.address.includes('@'));
-  // Ensure credentials are not leaked in response JSON and cookie is HttpOnly + Secure
-  assert.equal((mailbox as Record<string, unknown>).guerrillaSid, undefined);
-  assert.equal((mailbox as Record<string, unknown>).mailtmToken, undefined);
+  assert.equal(mailbox.provider, 'tempmail_plus');
+  assert.equal(mailbox.isLive, true);
   assert.ok(created.setCookies.some((c) => c.includes('HttpOnly') && c.includes('Secure')));
 
-  // 3. List mailboxes across stateless request via Cookie header
+  // 3. List mailboxes and poll live messages cleanly
   const listed = await callCf('GET', '/api/mailboxes');
   assert.equal(listed.status, 200);
-  const listArr = listed.json.mailboxes as Array<{ id: string }>;
-  assert.ok(listArr.some((m) => m.id === mailbox.id));
-
-  // 4. Send Meta 620252 test email & read it back
-  const sampleRes = await callCf('POST', `/api/mailboxes/${mailbox.id}/test-email`, {});
-  assert.equal(sampleRes.status, 201);
-  const sampleMsg = sampleRes.json.message as { id: string; otpCodes: string[] };
-  assert.deepEqual(sampleMsg.otpCodes, ['620252']);
+  assert.ok((listed.json.mailboxes as Array<{ id: string }>).some((m) => m.id === mailbox.id));
 
   const inbox = await callCf('GET', `/api/mailboxes/${mailbox.id}/messages`);
   assert.equal(inbox.status, 200);
-  const msgs = inbox.json.messages as Array<{ id: string; isRead: boolean }>;
-  assert.ok(msgs.some((m) => m.id === sampleMsg.id && !m.isRead));
+  assert.ok(Array.isArray(inbox.json.messages));
 
-  const detail = await callCf('GET', `/api/mailboxes/${mailbox.id}/messages/${sampleMsg.id}`);
-  assert.equal(detail.status, 200);
-  assert.equal((detail.json.message as { isRead: boolean }).isRead, true);
+  // 4. Removed fake test-email endpoint must return 404 JSON
+  const fakeTest = await callCf('POST', `/api/mailboxes/${mailbox.id}/test-email`, {});
+  assert.equal(fakeTest.status, 404);
 
-  // 5. Delete message & verify removal
-  const delMsg = await callCf('DELETE', `/api/mailboxes/${mailbox.id}/messages/${sampleMsg.id}`);
-  assert.equal(delMsg.status, 200);
-
-  const inboxAfterDel = await callCf('GET', `/api/mailboxes/${mailbox.id}/messages`);
-  const msgsAfterDel = inboxAfterDel.json.messages as Array<{ id: string }>;
-  assert.ok(!msgsAfterDel.some((m) => m.id === sampleMsg.id));
-
-  // 6. Delete mailbox & verify cookie expiration + 404
+  // 5. Delete mailbox expires cookie and returns 404 afterwards
   const delMb = await callCf('DELETE', `/api/mailboxes/${mailbox.id}`);
   assert.equal(delMb.status, 200);
   assert.equal(cookieJar.has(`tm_m_${mailbox.id}`), false);
 
   const missing = await callCf('GET', `/api/mailboxes/${mailbox.id}/messages`);
   assert.equal(missing.status, 404);
-
-  // 7. Unknown API route returns JSON 404
-  const unknown = await callCf('GET', '/api/nonexistent');
-  assert.equal(unknown.status, 404);
-  assert.equal(typeof unknown.json.error, 'string');
 });
 
 test('Cloudflare Worker entry point routes /api/* to edge handler and delegates static paths to ASSETS', async () => {

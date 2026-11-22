@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 
-type MailProvider = 'mailtm' | 'tempmail_lol' | 'guerrilla' | 'local';
+type MailProvider = 'mailtm' | 'tempmail_plus' | 'tempmail_lol';
 
 interface DomainInfo {
   domain: string;
@@ -36,7 +36,6 @@ interface EmailSummary {
   receivedAt: string;
   isRead: boolean;
   otpCodes: string[];
-  isSample?: boolean;
 }
 
 interface EmailDetail extends EmailSummary {
@@ -66,16 +65,6 @@ interface ParsedEmailInput {
   username?: string;
   domain?: string;
   error?: string;
-}
-
-interface SampleEmailContent {
-  fromName: string;
-  fromAddress: string;
-  subject: string;
-  receivedAt: string;
-  textBody: string;
-  htmlBody: string;
-  rawSource: string;
 }
 
 function parseValidPort(value: string | undefined): number | null {
@@ -254,160 +243,6 @@ function sanitizeEmailHtml(rawHtml: string): string {
   return html;
 }
 
-function buildSampleTestEmail(
-  recipientAddress: string,
-  variantIndex = 0,
-  nowIso: string = new Date().toISOString()
-): SampleEmailContent {
-  const idx = Math.abs(variantIndex) % 3;
-  if (idx === 0) {
-    const otp = '620252';
-    const subject = 'Xác nhận email cho Tài khoản Meta mới';
-    const fromName = 'Meta';
-    const fromAddress = 'security@account.meta.com';
-    const textBody = [
-      'Meta',
-      '',
-      'Vui lòng xác nhận email cho tài khoản Meta mới của bạn bằng cách nhập mã xác nhận sau đây.',
-      '',
-      'Mã xác nhận',
-      otp,
-      '',
-      'Nếu bạn không yêu cầu mã xác nhận, hãy bỏ qua thông báo này.',
-      '',
-      '© Meta. Meta Platforms, Inc., Attention: Community Support, 1 Meta Way, Menlo Park, CA 94025',
-      `Thư này đã được gửi đến ${recipientAddress}. Để góp phần bảo mật trang cá nhân của bạn, vui lòng không chuyển tiếp email này.`,
-    ].join('\n');
-    const htmlBody = `<!doctype html>
-<html lang="vi">
-<head>
-  <meta charset="utf-8" />
-  <style>
-    body { margin: 0; padding: 28px 20px; background: #ffffff; color: #1c1e21; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; }
-    .container { max-width: 560px; margin: 0 auto; }
-    .brand { display: flex; align-items: center; gap: 8px; font-size: 20px; font-weight: 700; color: #1c2b33; padding-bottom: 18px; border-bottom: 1px solid #e5e7eb; margin-bottom: 24px; }
-    .brand-mark { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 8px; background: #0064e0; color: #ffffff; font-size: 15px; font-weight: 700; }
-    .lead { font-size: 15px; color: #1c2b33; margin: 0 0 20px; }
-    .code-label { font-size: 13px; color: #606770; margin-bottom: 8px; font-weight: 600; }
-    .code-box { display: inline-block; padding: 14px 24px; background: #f0f4f9; border: 1px solid #d5e1f2; border-radius: 10px; font-size: 28px; font-weight: 700; letter-spacing: 6px; color: #0064e0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin-bottom: 20px; }
-    .note { font-size: 14px; color: #4b5563; margin: 0 0 28px; }
-    .footer { border-top: 1px solid #e5e7eb; padding-top: 16px; font-size: 12px; color: #6b7280; line-height: 1.55; }
-    .footer p { margin: 0 0 8px; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="brand"><span class="brand-mark">M</span><span>Meta</span></div>
-    <p class="lead">Vui lòng xác nhận email cho tài khoản Meta mới của bạn bằng cách nhập mã xác nhận sau đây.</p>
-    <div class="code-label">Mã xác nhận</div>
-    <div class="code-box">${otp}</div>
-    <p class="note">Nếu bạn không yêu cầu mã xác nhận, hãy bỏ qua thông báo này.</p>
-    <div class="footer">
-      <p>© Meta. Meta Platforms, Inc., Attention: Community Support, 1 Meta Way, Menlo Park, CA 94025</p>
-      <p>Thư này đã được gửi đến <strong>${recipientAddress}</strong>. Để góp phần bảo mật trang cá nhân của bạn, vui lòng không chuyển tiếp email này.</p>
-    </div>
-  </div>
-</body>
-</html>`;
-    const rawSource = [
-      `Delivered-To: ${recipientAddress}`,
-      `From: "${fromName}" <${fromAddress}>`,
-      `To: <${recipientAddress}>`,
-      `Date: ${new Date(nowIso).toUTCString()}`,
-      `Subject: ${subject}`,
-      `Message-ID: <meta-verify-${Date.now()}@account.meta.com>`,
-      `MIME-Version: 1.0`,
-      `Content-Type: text/plain; charset="UTF-8"`,
-      ``,
-      textBody,
-    ].join('\r\n');
-    return { fromName, fromAddress, subject, receivedAt: nowIso, textBody, htmlBody, rawSource };
-  }
-
-  if (idx === 1) {
-    const otp = '482917';
-    const subject = '[GitHub] Mã xác minh thiết bị đăng nhập mới';
-    const fromName = 'GitHub';
-    const fromAddress = 'noreply@github.com';
-    const textBody = [
-      'Chào bạn,',
-      '',
-      'Chúng tôi phát hiện yêu cầu đăng nhập vào tài khoản GitHub từ một thiết bị mới.',
-      `Mã xác minh của bạn là: ${otp}`,
-      '',
-      'Mã này sẽ hết hạn sau 15 phút. Nếu không phải bạn thực hiện, vui lòng bỏ qua email này.',
-    ].join('\n');
-    const htmlBody = `<!doctype html>
-<html lang="vi">
-<head><meta charset="utf-8" /><style>
-  body { margin: 0; padding: 28px 20px; background: #fff; color: #1f2328; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.6; }
-  .wrap { max-width: 540px; margin: 0 auto; }
-  .code { font-family: ui-monospace, monospace; font-size: 26px; font-weight: 700; letter-spacing: 5px; background: #f6f8fa; border: 1px solid #d0d7de; padding: 14px 22px; border-radius: 8px; display: inline-block; margin: 14px 0; }
-  .muted { color: #656d76; font-size: 13px; }
-</style></head>
-<body>
-  <div class="wrap">
-    <h2 style="margin:0 0 12px;font-size:18px;">Xác minh thiết bị GitHub</h2>
-    <p>Chúng tôi phát hiện yêu cầu đăng nhập từ thiết bị mới cho địa chỉ <strong>${recipientAddress}</strong>.</p>
-    <div class="code">${otp}</div>
-    <p class="muted">Mã xác minh có hiệu lực trong 15 phút. Không chia sẻ mã này cho bất kỳ ai.</p>
-  </div>
-</body>
-</html>`;
-    const rawSource = [
-      `Delivered-To: ${recipientAddress}`,
-      `From: "${fromName}" <${fromAddress}>`,
-      `To: <${recipientAddress}>`,
-      `Date: ${new Date(nowIso).toUTCString()}`,
-      `Subject: ${subject}`,
-      `MIME-Version: 1.0`,
-      `Content-Type: text/plain; charset="UTF-8"`,
-      ``,
-      textBody,
-    ].join('\r\n');
-    return { fromName, fromAddress, subject, receivedAt: nowIso, textBody, htmlBody, rawSource };
-  }
-
-  const otp = '739104';
-  const subject = 'Notion — Mã đăng nhập một lần của bạn';
-  const fromName = 'Notion';
-  const fromAddress = 'notify@mail.notion.so';
-  const textBody = [
-    'Xin chào,',
-    '',
-    `Mã đăng nhập tạm thời của bạn là ${otp}.`,
-    'Nhập mã này vào cửa sổ trình duyệt để tiếp tục vào không gian làm việc Notion.',
-  ].join('\n');
-  const htmlBody = `<!doctype html>
-<html lang="vi">
-<head><meta charset="utf-8" /><style>
-  body { margin: 0; padding: 28px 20px; background: #fff; color: #2f3437; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.6; }
-  .wrap { max-width: 540px; margin: 0 auto; }
-  .code { font-family: ui-monospace, monospace; font-size: 26px; font-weight: 700; letter-spacing: 5px; background: #f7f6f3; border: 1px solid #e3e2de; padding: 14px 22px; border-radius: 8px; display: inline-block; margin: 14px 0; }
-</style></head>
-<body>
-  <div class="wrap">
-    <h2 style="margin:0 0 12px;font-size:18px;">Đăng nhập vào Notion</h2>
-    <p>Sử dụng mã OTP bên dưới để hoàn tất đăng nhập cho <strong>${recipientAddress}</strong>:</p>
-    <div class="code">${otp}</div>
-    <p style="font-size:13px;color:#787774;">Nếu bạn không yêu cầu đăng nhập, bạn có thể an toàn bỏ qua thư này.</p>
-  </div>
-</body>
-</html>`;
-  const rawSource = [
-    `Delivered-To: ${recipientAddress}`,
-    `From: "${fromName}" <${fromAddress}>`,
-    `To: <${recipientAddress}>`,
-    `Date: ${new Date(nowIso).toUTCString()}`,
-    `Subject: ${subject}`,
-    `MIME-Version: 1.0`,
-    `Content-Type: text/plain; charset="UTF-8"`,
-    ``,
-    textBody,
-  ].join('\r\n');
-  return { fromName, fromAddress, subject, receivedAt: nowIso, textBody, htmlBody, rawSource };
-}
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -422,14 +257,17 @@ const SERVE_STATIC_DIST = shouldServeStaticDist({
 const REQUEST_TIMEOUT_MS = 7000;
 
 const MAILTM_API = 'https://api.mail.tm';
+const TEMPMAIL_PLUS_API = 'https://tempmail.plus/api/mails';
 const TEMPMAIL_LOL_API = 'https://api.tempmail.lol/v2';
-const GUERRILLA_API = 'https://api.guerrillamail.com/ajax.php';
 
-const GUERRILLA_DOMAINS = [
-  'sharklasers.com',
-  'guerrillamailblock.com',
-  'grr.la',
-  'spam4.me',
+const TEMPMAIL_PLUS_DOMAINS = [
+  'mailto.plus',
+  'fexpost.com',
+  'fexbox.org',
+  'fextemp.com',
+  'merepost.com',
+  'chitthi.in',
+  'any.pink',
 ];
 
 interface StoredMailbox {
@@ -440,36 +278,19 @@ interface StoredMailbox {
   provider: MailProvider;
   createdAt: string;
   isLive: boolean;
-  // Server-only provider credentials (never exposed to browser)
   mailtmAccountId?: string;
   mailtmToken?: string;
   tempmailLolToken?: string;
-  guerrillaSid?: string;
-  // Local sample / cached messages
-  localMessages: EmailDetail[];
   deletedMessageIds: Set<string>;
   readMessageIds: Set<string>;
-  sampleCounter: number;
   lastKnownRemoteCount: number;
   lastKnownRemoteUnread: number;
 }
 
-interface PendingGeneratedEmail {
-  address: string;
-  username: string;
-  domain: string;
-  provider: MailProvider;
-  token: string;
-  createdAt: number;
-}
-
 const mailboxes = new Map<string, StoredMailbox>();
-const pendingGenerated = new Map<string, PendingGeneratedEmail>();
-
 let cachedDomains: DomainInfo[] = [];
 let domainsFetchedAt = 0;
 const DOMAIN_CACHE_TTL_MS = 5 * 60 * 1000;
-
 const SAFE_ID_RE = /^[a-zA-Z0-9._-]{2,128}$/;
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -478,7 +299,7 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     headers: {
       Accept: 'application/ld+json, application/json, */*',
-      'User-Agent': 'TempMailApp/1.0',
+      'User-Agent': 'Mozilla/5.0 (compatible; TempMailApp/1.0)',
       ...(init?.headers ?? {}),
     },
   });
@@ -493,6 +314,16 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+function extractHydraItems<T>(payload: unknown): T[] {
+  if (Array.isArray(payload)) return payload as T[];
+  if (payload && typeof payload === 'object') {
+    const rec = payload as Record<string, unknown>;
+    if (Array.isArray(rec['hydra:member'])) return rec['hydra:member'] as T[];
+    if (Array.isArray(rec.member)) return rec.member as T[];
+  }
+  return [];
+}
+
 async function fetchLiveDomains(forceRefresh = false): Promise<DomainInfo[]> {
   const now = Date.now();
   if (!forceRefresh && cachedDomains.length > 0 && now - domainsFetchedAt < DOMAIN_CACHE_TTL_MS) {
@@ -500,12 +331,9 @@ async function fetchLiveDomains(forceRefresh = false): Promise<DomainInfo[]> {
   }
 
   const domains: DomainInfo[] = [];
-
   try {
-    const data = await fetchJson<{
-      'hydra:member'?: Array<{ domain?: string; isActive?: boolean }>;
-    }>(`${MAILTM_API}/domains`);
-    const members = data['hydra:member'] ?? [];
+    const raw = await fetchJson<unknown>(`${MAILTM_API}/domains`);
+    const members = extractHydraItems<{ domain?: string; isActive?: boolean }>(raw);
     for (const item of members) {
       if (item.domain && item.isActive !== false) {
         domains.push({
@@ -516,16 +344,12 @@ async function fetchLiveDomains(forceRefresh = false): Promise<DomainInfo[]> {
       }
     }
   } catch {
-    // Mail.tm temporarily unavailable; GuerrillaMail domains remain available
+    // Mail.tm temporarily unavailable; TempMail.plus domains remain active
   }
 
-  for (const d of GUERRILLA_DOMAINS) {
+  for (const d of TEMPMAIL_PLUS_DOMAINS) {
     if (!domains.some((item) => item.domain === d)) {
-      domains.push({
-        domain: d,
-        provider: 'guerrilla',
-        active: true,
-      });
+      domains.push({ domain: d, provider: 'tempmail_plus', active: true });
     }
   }
 
@@ -534,9 +358,27 @@ async function fetchLiveDomains(forceRefresh = false): Promise<DomainInfo[]> {
   return domains;
 }
 
+function parseFromHeader(raw: string): { name: string; address: string } {
+  const match = raw.match(/^(.*?)\s*<([^>]+)>$/);
+  if (match) {
+    const cleanName = match[1].replace(/^["'\s]+|["'\s]+$/g, '');
+    return { name: cleanName || match[2].split('@')[0], address: match[2].trim() };
+  }
+  const trimmed = raw.trim();
+  return { name: trimmed.split('@')[0] || 'Người gửi', address: trimmed };
+}
+
+function parseLooseDate(raw: string | undefined): string {
+  if (!raw) return new Date().toISOString();
+  const parsed = Date.parse(raw);
+  if (!Number.isNaN(parsed)) return new Date(parsed).toISOString();
+  const isoCandidate = raw.replace(' ', 'T') + 'Z';
+  const parsedIso = Date.parse(isoCandidate);
+  if (!Number.isNaN(parsedIso)) return new Date(parsedIso).toISOString();
+  return new Date().toISOString();
+}
+
 function toPublicMailbox(mb: StoredMailbox): Mailbox {
-  const activeLocal = mb.localMessages.filter((m) => !mb.deletedMessageIds.has(m.id));
-  const localUnread = activeLocal.filter((m) => !mb.readMessageIds.has(m.id)).length;
   return {
     id: mb.id,
     address: mb.address,
@@ -544,19 +386,25 @@ function toPublicMailbox(mb: StoredMailbox): Mailbox {
     domain: mb.domain,
     provider: mb.provider,
     createdAt: mb.createdAt,
-    messageCount: activeLocal.length + mb.lastKnownRemoteCount,
-    unreadCount: localUnread + mb.lastKnownRemoteUnread,
+    messageCount: mb.lastKnownRemoteCount,
+    unreadCount: mb.lastKnownRemoteUnread,
     isLive: mb.isLive,
   };
 }
 
-function cleanupPendingGenerated() {
-  const cutoff = Date.now() - 15 * 60 * 1000;
-  for (const [key, item] of pendingGenerated.entries()) {
-    if (item.createdAt < cutoff) {
-      pendingGenerated.delete(key);
-    }
-  }
+function toSummary(msg: EmailDetail): EmailSummary {
+  return {
+    id: msg.id,
+    mailboxId: msg.mailboxId,
+    fromName: msg.fromName,
+    fromAddress: msg.fromAddress,
+    toAddress: msg.toAddress,
+    subject: msg.subject,
+    snippet: msg.snippet,
+    receivedAt: msg.receivedAt,
+    isRead: msg.isRead,
+    otpCodes: msg.otpCodes,
+  };
 }
 
 async function createMailTmAccount(
@@ -565,41 +413,17 @@ async function createMailTmAccount(
 ): Promise<{ accountId: string; token: string; address: string }> {
   const address = `${username}@${domain}`;
   const password = crypto.randomBytes(16).toString('hex');
-
   const account = await fetchJson<{ id: string; address: string }>(`${MAILTM_API}/accounts`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ address, password }),
   });
-
   const tokenRes = await fetchJson<{ token: string }>(`${MAILTM_API}/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ address, password }),
   });
-
   return { accountId: account.id, token: tokenRes.token, address: account.address };
-}
-
-async function createGuerrillaAccount(
-  username: string,
-  domain: string
-): Promise<{ sid: string; address: string }> {
-  const initData = await fetchJson<{ sid_token?: string; email_addr?: string }>(
-    `${GUERRILLA_API}?f=get_email_address`
-  );
-  if (!initData.sid_token) {
-    throw new Error('GuerrillaMail session unavailable');
-  }
-  const setRes = await fetchJson<{ email_addr?: string; sid_token?: string }>(
-    `${GUERRILLA_API}?f=set_email_user&email_user=${encodeURIComponent(username)}&lang=en&sid_token=${encodeURIComponent(initData.sid_token)}`
-  );
-  const actualUser = (setRes.email_addr?.split('@')[0] || username).toLowerCase();
-  const chosenDomain = GUERRILLA_DOMAINS.includes(domain) ? domain : 'sharklasers.com';
-  return {
-    sid: setRes.sid_token || initData.sid_token,
-    address: `${actualUser}@${chosenDomain}`,
-  };
 }
 
 async function createTempMailLolAccount(): Promise<{ address: string; token: string }> {
@@ -617,30 +441,91 @@ async function createTempMailLolAccount(): Promise<{ address: string; token: str
   return { address: data.address.toLowerCase(), token: data.token };
 }
 
+async function fetchTempMailPlusDetail(
+  address: string,
+  mailboxId: string,
+  rawMailId: string,
+  isRead: boolean
+): Promise<EmailDetail | null> {
+  try {
+    const data = await fetchJson<{
+      result?: boolean;
+      mail_id?: number | string;
+      from?: string;
+      from_mail?: string;
+      from_name?: string;
+      to?: string;
+      subject?: string;
+      date?: string;
+      text?: string;
+      html?: string;
+      message_id?: string;
+    }>(`${TEMPMAIL_PLUS_API}/${encodeURIComponent(rawMailId)}?email=${encodeURIComponent(address)}&epin=`);
+
+    if (!data || data.result === false) return null;
+
+    const subject = data.subject || '(Không có tiêu đề)';
+    const htmlBody = sanitizeEmailHtml(data.html || '');
+    const textBody = data.text || stripHtmlToText(htmlBody);
+    const fromAddress = data.from_mail || parseFromHeader(data.from || '').address || 'unknown@sender';
+    const fromName =
+      data.from_name || parseFromHeader(data.from || '').name || fromAddress.split('@')[0] || 'Người gửi';
+    const receivedAt = parseLooseDate(data.date);
+    const otpCodes = extractOtpCodes(`${textBody}\n${htmlBody}`, subject);
+    const rawSource = [
+      `Delivered-To: ${address}`,
+      `From: ${data.from || `"${fromName}" <${fromAddress}>`}`,
+      `To: <${data.to || address}>`,
+      `Date: ${data.date || new Date(receivedAt).toUTCString()}`,
+      `Subject: ${subject}`,
+      ...(data.message_id ? [`Message-ID: ${data.message_id}`] : []),
+      `MIME-Version: 1.0`,
+      `Content-Type: text/plain; charset="UTF-8"`,
+      ``,
+      textBody,
+    ].join('\r\n');
+
+    return {
+      id: `tmp_${rawMailId}`,
+      mailboxId,
+      fromName,
+      fromAddress,
+      toAddress: data.to || address,
+      subject,
+      snippet: textBody.slice(0, 140),
+      receivedAt,
+      isRead,
+      otpCodes,
+      textBody,
+      htmlBody,
+      rawSource,
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function fetchRemoteMessages(mb: StoredMailbox): Promise<EmailDetail[]> {
   if (!mb.isLive) return [];
 
   if (mb.provider === 'mailtm' && mb.mailtmToken) {
     try {
-      const list = await fetchJson<{
-        'hydra:member'?: Array<{
-          id: string;
-          from?: { name?: string; address?: string };
-          to?: Array<{ address?: string }>;
-          subject?: string;
-          intro?: string;
-          createdAt?: string;
-          seen?: boolean;
-        }>;
-      }>(`${MAILTM_API}/messages`, {
+      const raw = await fetchJson<unknown>(`${MAILTM_API}/messages`, {
         headers: { Authorization: `Bearer ${mb.mailtmToken}` },
       });
+      const items = extractHydraItems<{
+        id: string;
+        from?: { name?: string; address?: string };
+        to?: Array<{ address?: string }>;
+        subject?: string;
+        intro?: string;
+        createdAt?: string;
+        seen?: boolean;
+      }>(raw).filter((m) => Boolean(m?.id) && !mb.deletedMessageIds.has(m.id));
 
-      const items = (list['hydra:member'] ?? []).filter((m) => !mb.deletedMessageIds.has(m.id));
-      return items.map((item) => {
+      const summaries: EmailDetail[] = items.map((item) => {
         const subject = item.subject || '(Không có tiêu đề)';
         const snippet = item.intro || '';
-        const otpCodes = extractOtpCodes(snippet, subject);
         return {
           id: item.id,
           mailboxId: mb.id,
@@ -651,12 +536,83 @@ async function fetchRemoteMessages(mb: StoredMailbox): Promise<EmailDetail[]> {
           snippet,
           receivedAt: item.createdAt || new Date().toISOString(),
           isRead: Boolean(item.seen) || mb.readMessageIds.has(item.id),
-          otpCodes,
+          otpCodes: extractOtpCodes(snippet, subject),
           textBody: snippet,
           htmlBody: '',
           rawSource: '',
         };
       });
+
+      const needsOtpCheck = summaries.filter((m) => m.otpCodes.length === 0).slice(0, 3);
+      await Promise.all(
+        needsOtpCheck.map(async (msg) => {
+          try {
+            const detail = await fetchJson<{ text?: string; html?: string[] }>(
+              `${MAILTM_API}/messages/${encodeURIComponent(msg.id)}`,
+              { headers: { Authorization: `Bearer ${mb.mailtmToken}` } }
+            );
+            const htmlStr = Array.isArray(detail.html) ? detail.html.join('\n') : '';
+            const fullText = detail.text || stripHtmlToText(htmlStr);
+            const detected = extractOtpCodes(`${fullText}\n${htmlStr}`, msg.subject);
+            if (detected.length > 0) msg.otpCodes = detected;
+            if (!msg.snippet && fullText) msg.snippet = fullText.slice(0, 140);
+          } catch {
+            // Keep summary as-is
+          }
+        })
+      );
+
+      return summaries;
+    } catch {
+      return [];
+    }
+  }
+
+  if (mb.provider === 'tempmail_plus') {
+    try {
+      const data = await fetchJson<{
+        result?: boolean;
+        mail_list?: Array<{
+          mail_id: number | string;
+          from_mail?: string;
+          from_name?: string;
+          subject?: string;
+          time?: string;
+          is_new?: boolean;
+        }>;
+      }>(`${TEMPMAIL_PLUS_API}?email=${encodeURIComponent(mb.address)}&limit=20&epin=`);
+
+      const list = (data.mail_list ?? []).filter(
+        (m) => m.mail_id !== undefined && !mb.deletedMessageIds.has(`tmp_${m.mail_id}`)
+      );
+
+      return await Promise.all(
+        list.map(async (item, idx) => {
+          const rawId = String(item.mail_id);
+          const id = `tmp_${rawId}`;
+          const isRead = mb.readMessageIds.has(id) || item.is_new === false;
+          if (idx < 5) {
+            const detail = await fetchTempMailPlusDetail(mb.address, mb.id, rawId, isRead);
+            if (detail) return detail;
+          }
+          const subject = item.subject || '(Không có tiêu đề)';
+          return {
+            id,
+            mailboxId: mb.id,
+            fromName: item.from_name || item.from_mail?.split('@')[0] || 'Người gửi',
+            fromAddress: item.from_mail || 'unknown@sender',
+            toAddress: mb.address,
+            subject,
+            snippet: subject,
+            receivedAt: parseLooseDate(item.time),
+            isRead,
+            otpCodes: extractOtpCodes(subject, subject),
+            textBody: '',
+            htmlBody: '',
+            rawSource: '',
+          };
+        })
+      );
     } catch {
       return [];
     }
@@ -675,8 +631,7 @@ async function fetchRemoteMessages(mb: StoredMailbox): Promise<EmailDetail[]> {
         }>;
       }>(`${TEMPMAIL_LOL_API}/inbox?token=${encodeURIComponent(mb.tempmailLolToken)}`);
 
-      const emails = data.emails ?? [];
-      return emails
+      return (data.emails ?? [])
         .map((item, idx) => {
           const stableHash = crypto
             .createHash('sha1')
@@ -692,7 +647,6 @@ async function fetchRemoteMessages(mb: StoredMailbox): Promise<EmailDetail[]> {
           const receivedAt = item.date
             ? new Date(item.date > 1e12 ? item.date : item.date * 1000).toISOString()
             : new Date().toISOString();
-          const otpCodes = extractOtpCodes(`${textBody}\n${htmlBody}`, subject);
           const rawSource = [
             `Delivered-To: ${mb.address}`,
             `From: ${fromRaw}`,
@@ -715,7 +669,7 @@ async function fetchRemoteMessages(mb: StoredMailbox): Promise<EmailDetail[]> {
             snippet: textBody.slice(0, 140),
             receivedAt,
             isRead: mb.readMessageIds.has(id),
-            otpCodes,
+            otpCodes: extractOtpCodes(`${textBody}\n${htmlBody}`, subject),
             textBody,
             htmlBody,
             rawSource,
@@ -727,88 +681,7 @@ async function fetchRemoteMessages(mb: StoredMailbox): Promise<EmailDetail[]> {
     }
   }
 
-  if (mb.provider === 'guerrilla' && mb.guerrillaSid) {
-    try {
-      const data = await fetchJson<{
-        list?: Array<{
-          mail_id: string;
-          mail_from: string;
-          mail_subject: string;
-          mail_excerpt: string;
-          mail_timestamp: string;
-          mail_read: string;
-        }>;
-      }>(`${GUERRILLA_API}?f=get_email_list&offset=0&sid_token=${encodeURIComponent(mb.guerrillaSid)}`);
-
-      // Filter out GuerrillaMail's synthetic default welcome promo message
-      const items = (data.list ?? []).filter((m) => {
-        const isDefaultPromo =
-          String(m.mail_id) === '1' ||
-          (m.mail_from?.toLowerCase() === 'no-reply@guerrillamail.com' &&
-            m.mail_subject === 'Welcome to Guerrilla Mail');
-        return !isDefaultPromo && !mb.deletedMessageIds.has(`gm_${m.mail_id}`);
-      });
-
-      return items.map((item) => {
-        const id = `gm_${item.mail_id}`;
-        const parsedFrom = parseFromHeader(item.mail_from || 'unknown@sender');
-        const subject = item.mail_subject || '(Không có tiêu đề)';
-        const snippet = stripHtmlToText(item.mail_excerpt || '');
-        const ts = Number(item.mail_timestamp);
-        const receivedAt =
-          Number.isFinite(ts) && ts > 1_000_000_000
-            ? new Date(ts * 1000).toISOString()
-            : new Date().toISOString();
-        const otpCodes = extractOtpCodes(snippet, subject);
-
-        return {
-          id,
-          mailboxId: mb.id,
-          fromName: parsedFrom.name,
-          fromAddress: parsedFrom.address,
-          toAddress: mb.address,
-          subject,
-          snippet,
-          receivedAt,
-          isRead: item.mail_read === '1' || mb.readMessageIds.has(id),
-          otpCodes,
-          textBody: snippet,
-          htmlBody: '',
-          rawSource: '',
-        };
-      });
-    } catch {
-      return [];
-    }
-  }
-
   return [];
-}
-
-function parseFromHeader(raw: string): { name: string; address: string } {
-  const match = raw.match(/^(.*?)\s*<([^>]+)>$/);
-  if (match) {
-    const cleanName = match[1].replace(/^["'\s]+|["'\s]+$/g, '');
-    return { name: cleanName || match[2].split('@')[0], address: match[2].trim() };
-  }
-  const trimmed = raw.trim();
-  return { name: trimmed.split('@')[0] || 'Người gửi', address: trimmed };
-}
-
-function toSummary(msg: EmailDetail): EmailSummary {
-  return {
-    id: msg.id,
-    mailboxId: msg.mailboxId,
-    fromName: msg.fromName,
-    fromAddress: msg.fromAddress,
-    toAddress: msg.toAddress,
-    subject: msg.subject,
-    snippet: msg.snippet,
-    receivedAt: msg.receivedAt,
-    isRead: msg.isRead,
-    otpCodes: msg.otpCodes,
-    isSample: msg.isSample,
-  };
 }
 
 async function startServer() {
@@ -821,7 +694,7 @@ async function startServer() {
       Promise.resolve(fn(req, res, next)).catch(next);
     };
 
-  // 1. GET /api/domains — Live domains list
+  // 1. GET /api/domains
   app.get(
     '/api/domains',
     wrapAsync(async (req, res) => {
@@ -835,7 +708,7 @@ async function startServer() {
     })
   );
 
-  // 2. GET /api/mailboxes — List active mailboxes in current server session
+  // 2. GET /api/mailboxes
   app.get('/api/mailboxes', (_req, res) => {
     const list = Array.from(mailboxes.values())
       .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
@@ -843,48 +716,31 @@ async function startServer() {
     res.json({ mailboxes: list });
   });
 
-  // 3. POST /api/mailboxes/generate — Generate a fresh email address preview
+  // 3. POST /api/mailboxes/generate
   app.post(
     '/api/mailboxes/generate',
-    wrapAsync(async (req, res) => {
-      cleanupPendingGenerated();
-      const mode = req.body?.mode === 'domain' ? 'domain' : 'email';
+    wrapAsync(async (_req, res) => {
+      const domains = await fetchLiveDomains();
+      const mailtmDomain = domains.find((d) => d.provider === 'mailtm');
+      const username = generateFakerUsername();
 
-      if (mode === 'email') {
-        // Try TempMail.lol first for instant unique system email address
-        try {
-          const created = await createTempMailLolAccount();
-          const [username, domain] = created.address.split('@');
-          const previewId = crypto.randomBytes(12).toString('hex');
-          pendingGenerated.set(previewId, {
-            address: created.address,
-            username,
-            domain,
-            provider: 'tempmail_lol',
-            token: created.token,
-            createdAt: Date.now(),
-          });
-          const payload: GeneratedEmailPreview = {
-            address: created.address,
-            username,
-            domain,
-            provider: 'tempmail_lol',
-            pregeneratedToken: previewId,
-          };
-          res.json(payload);
-          return;
-        } catch {
-          // Fall through to Mail.tm / GuerrillaMail preview
-        }
+      if (mailtmDomain) {
+        const payload: GeneratedEmailPreview = {
+          address: `${username}@${mailtmDomain.domain}`,
+          username,
+          domain: mailtmDomain.domain,
+          provider: 'mailtm',
+        };
+        res.json(payload);
+        return;
       }
 
-      const domains = await fetchLiveDomains();
-      const preferred = domains[0] ?? {
-        domain: 'sharklasers.com',
-        provider: 'guerrilla' as MailProvider,
-        active: true,
-      };
-      const username = generateFakerUsername();
+      const preferred =
+        domains[Math.floor(Math.random() * Math.max(1, domains.length))] ?? {
+          domain: 'mailto.plus',
+          provider: 'tempmail_plus' as MailProvider,
+          active: true,
+        };
       const payload: GeneratedEmailPreview = {
         address: `${username}@${preferred.domain}`,
         username,
@@ -895,75 +751,28 @@ async function startServer() {
     })
   );
 
-  // 4. POST /api/mailboxes — Create and activate a real disposable mailbox
+  // 4. POST /api/mailboxes
   app.post(
     '/api/mailboxes',
     wrapAsync(async (req, res) => {
-    cleanupPendingGenerated();
-    const body = (req.body ?? {}) as CreateMailboxPayload;
-    const mode = body.mode === 'domain' ? 'domain' : 'email';
-    const domains = await fetchLiveDomains();
+      const body = (req.body ?? {}) as CreateMailboxPayload;
+      const mode = body.mode === 'domain' ? 'domain' : 'email';
+      const domains = await fetchLiveDomains();
 
-    let createdMailbox: StoredMailbox | null = null;
-
-    // Case A: Activating a pregenerated TempMail.lol system email from "Generate email"
-    if (body.pregeneratedToken && pendingGenerated.has(body.pregeneratedToken)) {
-      const pending = pendingGenerated.get(body.pregeneratedToken)!;
-      pendingGenerated.delete(body.pregeneratedToken);
-      const id = `mb_${crypto.randomBytes(8).toString('hex')}`;
-      createdMailbox = {
-        id,
-        address: pending.address,
-        username: pending.username,
-        domain: pending.domain,
-        provider: 'tempmail_lol',
-        createdAt: new Date().toISOString(),
-        isLive: true,
-        tempmailLolToken: pending.token,
-        localMessages: [],
-        deletedMessageIds: new Set(),
-        readMessageIds: new Set(),
-        sampleCounter: 0,
-        lastKnownRemoteCount: 0,
-        lastKnownRemoteUnread: 0,
-      };
-    } else if (mode === 'email' && !body.email?.trim()) {
-      // Instant creation in Email mode without pre-clicking Generate email
-      try {
-        const tml = await createTempMailLolAccount();
-        const [username, domain] = tml.address.split('@');
-        createdMailbox = {
-          id: `mb_${crypto.randomBytes(8).toString('hex')}`,
-          address: tml.address,
-          username,
-          domain,
-          provider: 'tempmail_lol',
-          createdAt: new Date().toISOString(),
-          isLive: true,
-          tempmailLolToken: tml.token,
-          localMessages: [],
-          deletedMessageIds: new Set(),
-          readMessageIds: new Set(),
-          sampleCounter: 0,
-          lastKnownRemoteCount: 0,
-          lastKnownRemoteUnread: 0,
-        };
-      } catch {
-        // Fall through to Mail.tm / GuerrillaMail below
-      }
-    }
-
-    if (!createdMailbox) {
       const rawInput =
         mode === 'email'
           ? (body.email ?? '').trim() || generateFakerUsername()
           : (body.username ?? '').trim() || generateFakerUsername();
 
-      const fallbackDomain =
-        body.domain && body.domain !== 'random'
-          ? body.domain
+      const mailtmDomain = domains.find((d) => d.provider === 'mailtm')?.domain;
+      const randomDomain =
+        mode === 'email' && mailtmDomain
+          ? mailtmDomain
           : domains[Math.floor(Math.random() * Math.max(1, domains.length))]?.domain ||
-            'sharklasers.com';
+            'mailto.plus';
+
+      const fallbackDomain =
+        body.domain && body.domain !== 'random' ? body.domain : randomDomain;
 
       const parsed = parseEmailInput(rawInput, fallbackDomain);
       if (!parsed.valid || !parsed.username || !parsed.domain) {
@@ -975,7 +784,6 @@ async function startServer() {
       const requestedDomain = parsed.domain;
       const domainEntry = domains.find((d) => d.domain === requestedDomain);
 
-      // Avoid exact duplicate active mailbox; return existing if already created
       const existing = Array.from(mailboxes.values()).find(
         (m) => m.address.toLowerCase() === `${username}@${requestedDomain}`.toLowerCase()
       );
@@ -990,6 +798,8 @@ async function startServer() {
         Boolean(body.domain && body.domain !== 'random') &&
         Boolean(body.username?.trim() || body.email?.trim());
 
+      let createdMailbox: StoredMailbox | null = null;
+
       if (domainEntry?.provider === 'mailtm') {
         try {
           const mt = await createMailTmAccount(username, requestedDomain);
@@ -1003,10 +813,8 @@ async function startServer() {
             isLive: true,
             mailtmAccountId: mt.accountId,
             mailtmToken: mt.token,
-            localMessages: [],
             deletedMessageIds: new Set(),
             readMessageIds: new Set(),
-            sampleCounter: 0,
             lastKnownRemoteCount: 0,
             lastKnownRemoteUnread: 0,
           };
@@ -1018,90 +826,98 @@ async function startServer() {
             });
             return;
           }
-          // Otherwise fall through to live GuerrillaMail so the inbox can still receive real mail
+        }
+      }
+
+      if (!createdMailbox) {
+        const targetPlusDomain = TEMPMAIL_PLUS_DOMAINS.includes(requestedDomain)
+          ? requestedDomain
+          : TEMPMAIL_PLUS_DOMAINS[Math.floor(Math.random() * TEMPMAIL_PLUS_DOMAINS.length)];
+        const candidateAddr = `${username}@${targetPlusDomain}`;
+        try {
+          const check = await fetchJson<{ result?: boolean }>(
+            `${TEMPMAIL_PLUS_API}?email=${encodeURIComponent(candidateAddr)}&limit=1&epin=`
+          );
+          if (check?.result !== false) {
+            createdMailbox = {
+              id,
+              address: candidateAddr,
+              username,
+              domain: targetPlusDomain,
+              provider: 'tempmail_plus',
+              createdAt: new Date().toISOString(),
+              isLive: true,
+              deletedMessageIds: new Set(),
+              readMessageIds: new Set(),
+              lastKnownRemoteCount: 0,
+              lastKnownRemoteUnread: 0,
+            };
+          }
+        } catch {
+          // Fall through to TempMail.lol backup
         }
       }
 
       if (!createdMailbox) {
         try {
-          const targetDomain =
-            domainEntry?.provider === 'guerrilla' ? requestedDomain : 'sharklasers.com';
-          const gm = await createGuerrillaAccount(username, targetDomain);
-          const [gmUser, gmDom] = gm.address.split('@');
+          const tml = await createTempMailLolAccount();
+          const [tmlUser, tmlDom] = tml.address.split('@');
           createdMailbox = {
             id,
-            address: gm.address,
-            username: gmUser,
-            domain: gmDom,
-            provider: 'guerrilla',
+            address: tml.address,
+            username: tmlUser,
+            domain: tmlDom,
+            provider: 'tempmail_lol',
             createdAt: new Date().toISOString(),
             isLive: true,
-            guerrillaSid: gm.sid,
-            localMessages: [],
+            tempmailLolToken: tml.token,
             deletedMessageIds: new Set(),
             readMessageIds: new Set(),
-            sampleCounter: 0,
             lastKnownRemoteCount: 0,
             lastKnownRemoteUnread: 0,
           };
         } catch {
-          // Final resilient fallback only when every live provider is unreachable
+          res.status(502).json({
+            error: 'Không thể kết nối máy chủ nhận email thực lúc này. Vui lòng thử lại sau giây lát.',
+          });
+          return;
         }
       }
 
-      if (!createdMailbox) {
-        createdMailbox = {
-          id,
-          address: `${username}@${requestedDomain}`,
-          username,
-          domain: requestedDomain,
-          provider: 'local',
-          createdAt: new Date().toISOString(),
-          isLive: false,
-          localMessages: [],
-          deletedMessageIds: new Set(),
-          readMessageIds: new Set(),
-          sampleCounter: 0,
-          lastKnownRemoteCount: 0,
-          lastKnownRemoteUnread: 0,
-        };
-      }
-    }
-
-    mailboxes.set(createdMailbox.id, createdMailbox);
-    res.status(201).json({ mailbox: toPublicMailbox(createdMailbox) });
+      mailboxes.set(createdMailbox.id, createdMailbox);
+      res.status(201).json({ mailbox: toPublicMailbox(createdMailbox) });
     })
   );
 
-  // 5. DELETE /api/mailboxes/:id — Remove mailbox
+  // 5. DELETE /api/mailboxes/:id
   app.delete(
     '/api/mailboxes/:id',
     wrapAsync(async (req, res) => {
-    const id = req.params.id;
-    if (!SAFE_ID_RE.test(id)) {
-      res.status(400).json({ error: 'ID hộp thư không hợp lệ.' });
-      return;
-    }
-    const mb = mailboxes.get(id);
-    if (!mb) {
-      res.status(404).json({ error: 'Không tìm thấy hộp thư.' });
-      return;
-    }
+      const id = req.params.id;
+      if (!SAFE_ID_RE.test(id)) {
+        res.status(400).json({ error: 'ID hộp thư không hợp lệ.' });
+        return;
+      }
+      const mb = mailboxes.get(id);
+      if (!mb) {
+        res.status(404).json({ error: 'Không tìm thấy hộp thư.' });
+        return;
+      }
 
-    if (mb.provider === 'mailtm' && mb.mailtmAccountId && mb.mailtmToken) {
-      fetch(`${MAILTM_API}/accounts/${encodeURIComponent(mb.mailtmAccountId)}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${mb.mailtmToken}` },
-        signal: AbortSignal.timeout(4000),
-      }).catch(() => {});
-    }
+      if (mb.provider === 'mailtm' && mb.mailtmAccountId && mb.mailtmToken) {
+        fetch(`${MAILTM_API}/accounts/${encodeURIComponent(mb.mailtmAccountId)}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${mb.mailtmToken}` },
+          signal: AbortSignal.timeout(4000),
+        }).catch(() => {});
+      }
 
-    mailboxes.delete(id);
-    res.json({ deleted: true, id });
+      mailboxes.delete(id);
+      res.json({ deleted: true, id });
     })
   );
 
-  // 6. GET /api/mailboxes/:id/messages — Poll live & local messages
+  // 6. GET /api/mailboxes/:id/messages
   app.get(
     '/api/mailboxes/:id/messages',
     wrapAsync(async (req, res) => {
@@ -1120,203 +936,135 @@ async function startServer() {
       mb.lastKnownRemoteCount = remoteMessages.length;
       mb.lastKnownRemoteUnread = remoteMessages.filter((m) => !m.isRead).length;
 
-      const activeLocal = mb.localMessages
-        .filter((m) => !mb.deletedMessageIds.has(m.id))
-        .map((m) => ({
-          ...m,
-          isRead: mb.readMessageIds.has(m.id),
-        }));
-
-      const merged = [...activeLocal, ...remoteMessages].sort(
+      const sorted = remoteMessages.sort(
         (a, b) => Date.parse(b.receivedAt) - Date.parse(a.receivedAt)
       );
 
       res.json({
         mailbox: toPublicMailbox(mb),
-        messages: merged.map(toSummary),
+        messages: sorted.map(toSummary),
       });
     })
   );
 
-  // 7. GET /api/mailboxes/:id/messages/:messageId — Read full email detail & source
+  // 7. GET /api/mailboxes/:id/messages/:messageId
   app.get(
     '/api/mailboxes/:id/messages/:messageId',
     wrapAsync(async (req, res) => {
-    const { id, messageId } = req.params;
-    if (!SAFE_ID_RE.test(id) || !SAFE_ID_RE.test(messageId)) {
-      res.status(400).json({ error: 'Tham số không hợp lệ.' });
-      return;
-    }
-    const mb = mailboxes.get(id);
-    if (!mb) {
-      res.status(404).json({ error: 'Không tìm thấy hộp thư.' });
-      return;
-    }
+      const { id, messageId } = req.params;
+      if (!SAFE_ID_RE.test(id) || !SAFE_ID_RE.test(messageId)) {
+        res.status(400).json({ error: 'Tham số không hợp lệ.' });
+        return;
+      }
+      const mb = mailboxes.get(id);
+      if (!mb) {
+        res.status(404).json({ error: 'Không tìm thấy hộp thư.' });
+        return;
+      }
 
-    // Check local messages first
-    const localHit = mb.localMessages.find(
-      (m) => m.id === messageId && !mb.deletedMessageIds.has(m.id)
-    );
-    if (localHit) {
-      mb.readMessageIds.add(messageId);
-      res.json({ message: { ...localHit, isRead: true } });
-      return;
-    }
-
-    // Mail.tm full detail + raw source
-    if (mb.provider === 'mailtm' && mb.mailtmToken) {
-      try {
-        const detail = await fetchJson<{
-          id: string;
-          from?: { name?: string; address?: string };
-          to?: Array<{ address?: string }>;
-          subject?: string;
-          text?: string;
-          html?: string[];
-          createdAt?: string;
-        }>(`${MAILTM_API}/messages/${encodeURIComponent(messageId)}`, {
-          headers: { Authorization: `Bearer ${mb.mailtmToken}` },
-        });
-
-        let rawSource = '';
+      if (mb.provider === 'mailtm' && mb.mailtmToken) {
         try {
-          const src = await fetchJson<{ data?: string }>(
-            `${MAILTM_API}/sources/${encodeURIComponent(messageId)}`,
-            { headers: { Authorization: `Bearer ${mb.mailtmToken}` } }
-          );
-          rawSource = src.data || '';
-        } catch {
-          rawSource = '';
-        }
+          const detail = await fetchJson<{
+            id: string;
+            from?: { name?: string; address?: string };
+            to?: Array<{ address?: string }>;
+            subject?: string;
+            text?: string;
+            html?: string[];
+            createdAt?: string;
+          }>(`${MAILTM_API}/messages/${encodeURIComponent(messageId)}`, {
+            headers: { Authorization: `Bearer ${mb.mailtmToken}` },
+          });
 
-        const subject = detail.subject || '(Không có tiêu đề)';
-        const rawHtml = Array.isArray(detail.html) ? detail.html.join('\n') : '';
-        const htmlBody = sanitizeEmailHtml(rawHtml);
-        const textBody = detail.text || stripHtmlToText(htmlBody);
-        const otpCodes = extractOtpCodes(`${textBody}\n${htmlBody}`, subject);
-        const receivedAt = detail.createdAt || new Date().toISOString();
+          let rawSource = '';
+          try {
+            const src = await fetchJson<{ data?: string }>(
+              `${MAILTM_API}/sources/${encodeURIComponent(messageId)}`,
+              { headers: { Authorization: `Bearer ${mb.mailtmToken}` } }
+            );
+            rawSource = src.data || '';
+          } catch {
+            rawSource = '';
+          }
 
-        if (!rawSource) {
-          rawSource = [
-            `Delivered-To: ${mb.address}`,
-            `From: "${detail.from?.name || ''}" <${detail.from?.address || ''}>`,
-            `To: <${detail.to?.[0]?.address || mb.address}>`,
-            `Date: ${new Date(receivedAt).toUTCString()}`,
-            `Subject: ${subject}`,
-            ``,
+          const subject = detail.subject || '(Không có tiêu đề)';
+          const rawHtml = Array.isArray(detail.html) ? detail.html.join('\n') : '';
+          const htmlBody = sanitizeEmailHtml(rawHtml);
+          const textBody = detail.text || stripHtmlToText(htmlBody);
+          const otpCodes = extractOtpCodes(`${textBody}\n${htmlBody}`, subject);
+          const receivedAt = detail.createdAt || new Date().toISOString();
+
+          if (!rawSource) {
+            rawSource = [
+              `Delivered-To: ${mb.address}`,
+              `From: "${detail.from?.name || ''}" <${detail.from?.address || ''}>`,
+              `To: <${detail.to?.[0]?.address || mb.address}>`,
+              `Date: ${new Date(receivedAt).toUTCString()}`,
+              `Subject: ${subject}`,
+              ``,
+              textBody,
+            ].join('\r\n');
+          }
+
+          mb.readMessageIds.add(messageId);
+          fetch(`${MAILTM_API}/messages/${encodeURIComponent(messageId)}`, {
+            method: 'PATCH',
+            headers: {
+              Authorization: `Bearer ${mb.mailtmToken}`,
+              'Content-Type': 'application/merge-patch+json',
+            },
+            body: JSON.stringify({ seen: true }),
+            signal: AbortSignal.timeout(3000),
+          }).catch(() => {});
+
+          const full: EmailDetail = {
+            id: detail.id,
+            mailboxId: mb.id,
+            fromName: detail.from?.name || detail.from?.address?.split('@')[0] || 'Người gửi',
+            fromAddress: detail.from?.address || 'unknown@sender',
+            toAddress: detail.to?.[0]?.address || mb.address,
+            subject,
+            snippet: textBody.slice(0, 140),
+            receivedAt,
+            isRead: true,
+            otpCodes,
             textBody,
-          ].join('\r\n');
+            htmlBody,
+            rawSource,
+          };
+          res.json({ message: full });
+          return;
+        } catch {
+          res.status(404).json({ error: 'Không thể tải nội dung thư.' });
+          return;
         }
-
-        mb.readMessageIds.add(messageId);
-        // Mark seen upstream quietly
-        fetch(`${MAILTM_API}/messages/${encodeURIComponent(messageId)}`, {
-          method: 'PATCH',
-          headers: {
-            Authorization: `Bearer ${mb.mailtmToken}`,
-            'Content-Type': 'application/merge-patch+json',
-          },
-          body: JSON.stringify({ seen: true }),
-          signal: AbortSignal.timeout(3000),
-        }).catch(() => {});
-
-        const full: EmailDetail = {
-          id: detail.id,
-          mailboxId: mb.id,
-          fromName: detail.from?.name || detail.from?.address?.split('@')[0] || 'Người gửi',
-          fromAddress: detail.from?.address || 'unknown@sender',
-          toAddress: detail.to?.[0]?.address || mb.address,
-          subject,
-          snippet: textBody.slice(0, 140),
-          receivedAt,
-          isRead: true,
-          otpCodes,
-          textBody,
-          htmlBody,
-          rawSource,
-        };
-        res.json({ message: full });
-        return;
-      } catch {
-        res.status(404).json({ error: 'Không thể tải nội dung thư.' });
-        return;
       }
-    }
 
-    // TempMail.lol full detail
-    if (mb.provider === 'tempmail_lol' && mb.tempmailLolToken) {
-      const all = await fetchRemoteMessages(mb);
-      const hit = all.find((m) => m.id === messageId);
-      if (hit) {
-        mb.readMessageIds.add(messageId);
-        res.json({ message: { ...hit, isRead: true } });
-        return;
+      if (mb.provider === 'tempmail_plus' && messageId.startsWith('tmp_')) {
+        const rawMailId = messageId.slice(4);
+        const detail = await fetchTempMailPlusDetail(mb.address, mb.id, rawMailId, true);
+        if (detail) {
+          mb.readMessageIds.add(messageId);
+          res.json({ message: detail });
+          return;
+        }
       }
-    }
 
-    // GuerrillaMail full detail
-    if (mb.provider === 'guerrilla' && mb.guerrillaSid && messageId.startsWith('gm_')) {
-      const rawId = messageId.slice(3);
-      try {
-        const data = await fetchJson<{
-          mail_id?: string;
-          mail_from?: string;
-          mail_subject?: string;
-          mail_body?: string;
-          mail_timestamp?: string;
-        }>(
-          `${GUERRILLA_API}?f=fetch_email&email_id=${encodeURIComponent(rawId)}&sid_token=${encodeURIComponent(mb.guerrillaSid)}`
-        );
-
-        const parsedFrom = parseFromHeader(data.mail_from || 'unknown@sender');
-        const subject = data.mail_subject || '(Không có tiêu đề)';
-        const htmlBody = sanitizeEmailHtml(data.mail_body || '');
-        const textBody = stripHtmlToText(htmlBody);
-        const ts = Number(data.mail_timestamp);
-        const receivedAt =
-          Number.isFinite(ts) && ts > 1_000_000_000
-            ? new Date(ts * 1000).toISOString()
-            : new Date().toISOString();
-        const otpCodes = extractOtpCodes(`${textBody}\n${htmlBody}`, subject);
-        const rawSource = [
-          `Delivered-To: ${mb.address}`,
-          `From: ${data.mail_from || ''}`,
-          `To: <${mb.address}>`,
-          `Date: ${new Date(receivedAt).toUTCString()}`,
-          `Subject: ${subject}`,
-          ``,
-          textBody,
-        ].join('\r\n');
-
-        mb.readMessageIds.add(messageId);
-        const full: EmailDetail = {
-          id: messageId,
-          mailboxId: mb.id,
-          fromName: parsedFrom.name,
-          fromAddress: parsedFrom.address,
-          toAddress: mb.address,
-          subject,
-          snippet: textBody.slice(0, 140),
-          receivedAt,
-          isRead: true,
-          otpCodes,
-          textBody,
-          htmlBody,
-          rawSource,
-        };
-        res.json({ message: full });
-        return;
-      } catch {
-        res.status(404).json({ error: 'Không thể tải nội dung thư.' });
-        return;
+      if (mb.provider === 'tempmail_lol' && mb.tempmailLolToken) {
+        const all = await fetchRemoteMessages(mb);
+        const hit = all.find((m) => m.id === messageId);
+        if (hit) {
+          mb.readMessageIds.add(messageId);
+          res.json({ message: { ...hit, isRead: true } });
+          return;
+        }
       }
-    }
 
-    res.status(404).json({ error: 'Không tìm thấy thư.' });
+      res.status(404).json({ error: 'Không tìm thấy thư.' });
     })
   );
 
-  // 8. DELETE /api/mailboxes/:id/messages/:messageId — Delete a message
+  // 8. DELETE /api/mailboxes/:id/messages/:messageId
   app.delete(
     '/api/mailboxes/:id/messages/:messageId',
     wrapAsync(async (req, res) => {
@@ -1332,19 +1080,18 @@ async function startServer() {
       }
 
       mb.deletedMessageIds.add(messageId);
-      mb.localMessages = mb.localMessages.filter((m) => m.id !== messageId);
 
-      if (mb.provider === 'mailtm' && mb.mailtmToken && !messageId.startsWith('sample_')) {
+      if (mb.provider === 'mailtm' && mb.mailtmToken) {
         fetch(`${MAILTM_API}/messages/${encodeURIComponent(messageId)}`, {
           method: 'DELETE',
           headers: { Authorization: `Bearer ${mb.mailtmToken}` },
           signal: AbortSignal.timeout(4000),
         }).catch(() => {});
-      } else if (mb.provider === 'guerrilla' && mb.guerrillaSid && messageId.startsWith('gm_')) {
-        const rawId = messageId.slice(3);
+      } else if (mb.provider === 'tempmail_plus' && messageId.startsWith('tmp_')) {
+        const rawMailId = messageId.slice(4);
         fetch(
-          `${GUERRILLA_API}?f=del_email&email_ids[]=${encodeURIComponent(rawId)}&sid_token=${encodeURIComponent(mb.guerrillaSid)}`,
-          { signal: AbortSignal.timeout(4000) }
+          `${TEMPMAIL_PLUS_API}/${encodeURIComponent(rawMailId)}?email=${encodeURIComponent(mb.address)}&epin=`,
+          { method: 'DELETE', signal: AbortSignal.timeout(4000) }
         ).catch(() => {});
       }
 
@@ -1352,46 +1099,7 @@ async function startServer() {
     })
   );
 
-  // 9. POST /api/mailboxes/:id/test-email — Deliver a realistic OTP test email (Meta 620252, GitHub, Notion)
-  app.post('/api/mailboxes/:id/test-email', (req, res) => {
-    const id = req.params.id;
-    if (!SAFE_ID_RE.test(id)) {
-      res.status(400).json({ error: 'ID hộp thư không hợp lệ.' });
-      return;
-    }
-    const mb = mailboxes.get(id);
-    if (!mb) {
-      res.status(404).json({ error: 'Không tìm thấy hộp thư.' });
-      return;
-    }
-
-    const sample = buildSampleTestEmail(mb.address, mb.sampleCounter);
-    mb.sampleCounter += 1;
-
-    const msgId = `sample_${crypto.randomBytes(6).toString('hex')}`;
-    const otpCodes = extractOtpCodes(sample.textBody, sample.subject);
-    const detail: EmailDetail = {
-      id: msgId,
-      mailboxId: mb.id,
-      fromName: sample.fromName,
-      fromAddress: sample.fromAddress,
-      toAddress: mb.address,
-      subject: sample.subject,
-      snippet: sample.textBody.replace(/\s+/g, ' ').slice(0, 140),
-      receivedAt: sample.receivedAt,
-      isRead: false,
-      otpCodes,
-      isSample: true,
-      textBody: sample.textBody,
-      htmlBody: sanitizeEmailHtml(sample.htmlBody),
-      rawSource: sample.rawSource,
-    };
-
-    mb.localMessages.unshift(detail);
-    res.status(201).json({ message: toSummary(detail), mailbox: toPublicMailbox(mb) });
-  });
-
-  // Healthcheck endpoints (use /api/health on Cloud Run since /healthz is reserved by Google Frontend)
+  // Healthcheck endpoints
   app.get('/api/health', (_req, res) => {
     res.status(200).json({
       ok: true,
@@ -1403,7 +1111,6 @@ async function startServer() {
     res.status(200).json({ ok: true });
   });
 
-  // Ensure unmatched /api/* routes always return JSON rather than SPA index.html
   app.use('/api', (_req, res) => {
     res.status(404).json({ error: 'API endpoint không tồn tại.' });
   });
@@ -1424,7 +1131,6 @@ async function startServer() {
     });
     app.use(vite.middlewares);
 
-    // Fallback index.html in dev for client routes
     app.use('*', async (req, res, next) => {
       if (req.originalUrl.startsWith('/api')) return next();
       try {
@@ -1438,7 +1144,6 @@ async function startServer() {
     });
   }
 
-  // Global JSON error handler (catches invalid JSON bodies & async route errors safely)
   app.use(
     (
       err: unknown,
@@ -1448,7 +1153,7 @@ async function startServer() {
     ) => {
       const status =
         typeof (err as { status?: unknown })?.status === 'number'
-          ? ((err as { status: number }).status)
+          ? (err as { status: number }).status
           : 500;
       if (req.originalUrl.startsWith('/api')) {
         res.status(status >= 400 && status < 600 ? status : 500).json({

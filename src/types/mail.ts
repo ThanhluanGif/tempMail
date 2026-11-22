@@ -1,4 +1,4 @@
-export type MailProvider = 'mailtm' | 'tempmail_lol' | 'guerrilla' | 'local';
+export type MailProvider = 'mailtm' | 'tempmail_plus' | 'tempmail_lol';
 
 export type CreationMode = 'domain' | 'email';
 
@@ -31,7 +31,6 @@ export interface EmailSummary {
   receivedAt: string;
   isRead: boolean;
   otpCodes: string[];
-  isSample?: boolean;
 }
 
 export interface EmailDetail extends EmailSummary {

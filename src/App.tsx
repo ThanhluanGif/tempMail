@@ -10,7 +10,6 @@ import {
   fetchMessageDetail,
   fetchMessages,
   generateEmailPreview,
-  sendSampleTestEmail,
 } from './api/mailClient';
 import { MessageList } from './components/MessageList';
 import { MessageReader } from './components/MessageReader';
@@ -47,7 +46,6 @@ export default function App() {
   const [isCreating, setIsCreating] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isSendingSample, setIsSendingSample] = useState(false);
   const [isDeletingMessage, setIsDeletingMessage] = useState(false);
 
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -352,36 +350,6 @@ export default function App() {
     }
   };
 
-  const handleSendSampleEmail = async () => {
-    if (!selectedMailboxId) return;
-    setIsSendingSample(true);
-    try {
-      const { message, mailbox } = await sendSampleTestEmail(selectedMailboxId);
-      if (message?.id) {
-        setMessagesByMailbox((prev) => ({
-          ...prev,
-          [selectedMailboxId]: [
-            message,
-            ...(prev[selectedMailboxId] ?? []).filter((m) => m?.id && m.id !== message.id),
-          ],
-        }));
-      }
-      if (mailbox?.id) {
-        setMailboxes((prev) =>
-          prev
-            .filter((mb): mb is Mailbox => Boolean(mb?.id))
-            .map((mb) => (mb.id === mailbox.id ? mailbox : mb))
-        );
-      }
-      stampSyncTime();
-      showToast(`Đã nhận thư từ ${message.fromName}`);
-    } catch {
-      showToast('Không thể gửi thư thử nghiệm');
-    } finally {
-      setIsSendingSample(false);
-    }
-  };
-
   const selectedMailbox = mailboxes.find((mb) => mb.id === selectedMailboxId) ?? null;
   const activeMessages = selectedMailboxId ? messagesByMailbox[selectedMailboxId] ?? [] : [];
 
@@ -431,11 +399,9 @@ export default function App() {
               messages={activeMessages}
               selectedMessageId={selectedMessageId}
               isLoadingMessages={isLoadingMessages}
-              isSendingSample={isSendingSample}
               copiedValue={copiedValue}
               onSelectMessage={handleSelectMessage}
               onCopyText={handleCopyText}
-              onSendSampleEmail={handleSendSampleEmail}
             />
           </div>
 

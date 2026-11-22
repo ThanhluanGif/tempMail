@@ -1,5 +1,4 @@
 import {
-  buildSampleTestEmail,
   extractOtpCodes,
   generateFakerUsername,
   parseEmailInput,
@@ -26,12 +25,6 @@ interface CloudflarePagesContext {
   params: Record<string, string | string[]>;
 }
 
-interface SampleMeta {
-  id: string;
-  v: number;
-  t: string;
-}
-
 interface PersistedMailboxRecord {
   i: string; // id
   a: string; // address
@@ -43,11 +36,8 @@ interface PersistedMailboxRecord {
   ma?: string; // mailtmAccountId
   mt?: string; // mailtmToken
   lt?: string; // tempmailLolToken
-  gs?: string; // guerrillaSid
   del?: string[]; // deletedMessageIds
   rd?: string[]; // readMessageIds
-  sm?: SampleMeta[]; // sample test emails
-  sc?: number; // sampleCounter
 }
 
 interface PendingPreviewRecord {
@@ -56,26 +46,30 @@ interface PendingPreviewRecord {
   username: string;
   domain: string;
   provider: MailProvider;
-  token: string;
+  token?: string;
+  accountId?: string;
   createdAt: number;
 }
 
 const REQUEST_TIMEOUT_MS = 7000;
 const MAILTM_API = 'https://api.mail.tm';
+const TEMPMAIL_PLUS_API = 'https://tempmail.plus/api/mails';
 const TEMPMAIL_LOL_API = 'https://api.tempmail.lol/v2';
-const GUERRILLA_API = 'https://api.guerrillamail.com/ajax.php';
-const GUERRILLA_DOMAINS = [
-  'sharklasers.com',
-  'guerrillamailblock.com',
-  'grr.la',
-  'spam4.me',
+
+const TEMPMAIL_PLUS_DOMAINS = [
+  'mailto.plus',
+  'fexpost.com',
+  'fexbox.org',
+  'fextemp.com',
+  'merepost.com',
+  'chitthi.in',
+  'any.pink',
 ];
 
 const SAFE_ID_RE = /^[a-zA-Z0-9._-]{2,128}$/;
 const MAILBOX_COOKIE_PREFIX = 'tm_m_';
 const PENDING_COOKIE_NAME = 'tm_pending';
 const MAX_STORED_IDS = 40;
-const MAX_STORED_SAMPLES = 8;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -207,7 +201,7 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     headers: {
       Accept: 'application/ld+json, application/json, */*',
-      'User-Agent': 'TempMailApp/1.0',
+      'User-Agent': 'Mozilla/5.0 (compatible; TempMailApp/1.0)',
       ...(init?.headers ?? {}),
     },
   });
@@ -222,13 +216,22 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+function extractHydraItems<T>(payload: unknown): T[] {
+  if (Array.isArray(payload)) return payload as T[];
+  if (payload && typeof payload === 'object') {
+    const rec = payload as Record<string, unknown>;
+    if (Array.isArray(rec['hydra:member'])) return rec['hydra:member'] as T[];
+    if (Array.isArray(rec.member)) return rec.member as T[];
+  }
+  return [];
+}
+
 async function fetchLiveDomains(): Promise<DomainInfo[]> {
   const domains: DomainInfo[] = [];
   try {
-    const data = await fetchJson<{
-      'hydra:member'?: Array<{ domain?: string; isActive?: boolean }>;
-    }>(`${MAILTM_API}/domains`);
-    for (const item of data['hydra:member'] ?? []) {
+    const raw = await fetchJson<unknown>(`${MAILTM_API}/domains`);
+    const members = extractHydraItems<{ domain?: string; isActive?: boolean }>(raw);
+    for (const item of members) {
       if (item.domain && item.isActive !== false) {
         domains.push({
           domain: item.domain.toLowerCase(),
@@ -238,12 +241,12 @@ async function fetchLiveDomains(): Promise<DomainInfo[]> {
       }
     }
   } catch {
-    // Mail.tm temporarily unavailable; GuerrillaMail domains remain active
+    // Mail.tm temporarily unavailable; TempMail.plus domains remain active
   }
 
-  for (const d of GUERRILLA_DOMAINS) {
+  for (const d of TEMPMAIL_PLUS_DOMAINS) {
     if (!domains.some((item) => item.domain === d)) {
-      domains.push({ domain: d, provider: 'guerrilla', active: true });
+      domains.push({ domain: d, provider: 'tempmail_plus', active: true });
     }
   }
   return domains;
@@ -259,32 +262,14 @@ function parseFromHeader(raw: string): { name: string; address: string } {
   return { name: trimmed.split('@')[0] || 'Người gửi', address: trimmed };
 }
 
-function buildSampleDetail(mb: PersistedMailboxRecord, meta: SampleMeta): EmailDetail {
-  const sample = buildSampleTestEmail(mb.a, meta.v, meta.t);
-  const readSet = new Set(mb.rd ?? []);
-  return {
-    id: meta.id,
-    mailboxId: mb.i,
-    fromName: sample.fromName,
-    fromAddress: sample.fromAddress,
-    toAddress: mb.a,
-    subject: sample.subject,
-    snippet: sample.textBody.replace(/\s+/g, ' ').slice(0, 140),
-    receivedAt: sample.receivedAt,
-    isRead: readSet.has(meta.id),
-    otpCodes: extractOtpCodes(sample.textBody, sample.subject),
-    isSample: true,
-    textBody: sample.textBody,
-    htmlBody: sanitizeEmailHtml(sample.htmlBody),
-    rawSource: sample.rawSource,
-  };
-}
-
-function getActiveSampleDetails(mb: PersistedMailboxRecord): EmailDetail[] {
-  const deleted = new Set(mb.del ?? []);
-  return (mb.sm ?? [])
-    .filter((s) => !deleted.has(s.id))
-    .map((s) => buildSampleDetail(mb, s));
+function parseLooseDate(raw: string | undefined): string {
+  if (!raw) return new Date().toISOString();
+  const parsed = Date.parse(raw);
+  if (!Number.isNaN(parsed)) return new Date(parsed).toISOString();
+  const isoCandidate = raw.replace(' ', 'T') + 'Z';
+  const parsedIso = Date.parse(isoCandidate);
+  if (!Number.isNaN(parsedIso)) return new Date(parsedIso).toISOString();
+  return new Date().toISOString();
 }
 
 function toPublicMailbox(
@@ -292,8 +277,6 @@ function toPublicMailbox(
   remoteCount = 0,
   remoteUnread = 0
 ): Mailbox {
-  const samples = getActiveSampleDetails(mb);
-  const sampleUnread = samples.filter((m) => !m.isRead).length;
   return {
     id: mb.i,
     address: mb.a,
@@ -301,8 +284,8 @@ function toPublicMailbox(
     domain: mb.d,
     provider: mb.p,
     createdAt: mb.c,
-    messageCount: samples.length + remoteCount,
-    unreadCount: sampleUnread + remoteUnread,
+    messageCount: remoteCount,
+    unreadCount: remoteUnread,
     isLive: mb.l,
   };
 }
@@ -319,7 +302,6 @@ function toSummary(msg: EmailDetail): EmailSummary {
     receivedAt: msg.receivedAt,
     isRead: msg.isRead,
     otpCodes: msg.otpCodes,
-    isSample: msg.isSample,
   };
 }
 
@@ -342,25 +324,6 @@ async function createMailTmAccount(
   return { accountId: account.id, token: tokenRes.token, address: account.address };
 }
 
-async function createGuerrillaAccount(
-  username: string,
-  domain: string
-): Promise<{ sid: string; address: string }> {
-  const initData = await fetchJson<{ sid_token?: string; email_addr?: string }>(
-    `${GUERRILLA_API}?f=get_email_address`
-  );
-  if (!initData.sid_token) throw new Error('GuerrillaMail session unavailable');
-  const setRes = await fetchJson<{ email_addr?: string; sid_token?: string }>(
-    `${GUERRILLA_API}?f=set_email_user&email_user=${encodeURIComponent(username)}&lang=en&sid_token=${encodeURIComponent(initData.sid_token)}`
-  );
-  const actualUser = (setRes.email_addr?.split('@')[0] || username).toLowerCase();
-  const chosenDomain = GUERRILLA_DOMAINS.includes(domain) ? domain : 'sharklasers.com';
-  return {
-    sid: setRes.sid_token || initData.sid_token,
-    address: `${actualUser}@${chosenDomain}`,
-  };
-}
-
 async function createTempMailLolAccount(): Promise<{ address: string; token: string }> {
   const data = await fetchJson<{ address?: string; token?: string }>(
     `${TEMPMAIL_LOL_API}/inbox/create`,
@@ -376,6 +339,70 @@ async function createTempMailLolAccount(): Promise<{ address: string; token: str
   return { address: data.address.toLowerCase(), token: data.token };
 }
 
+async function fetchTempMailPlusDetail(
+  address: string,
+  mailboxId: string,
+  rawMailId: string,
+  isRead: boolean
+): Promise<EmailDetail | null> {
+  try {
+    const data = await fetchJson<{
+      result?: boolean;
+      mail_id?: number | string;
+      from?: string;
+      from_mail?: string;
+      from_name?: string;
+      to?: string;
+      subject?: string;
+      date?: string;
+      text?: string;
+      html?: string;
+      message_id?: string;
+    }>(`${TEMPMAIL_PLUS_API}/${encodeURIComponent(rawMailId)}?email=${encodeURIComponent(address)}&epin=`);
+
+    if (!data || data.result === false) return null;
+
+    const subject = data.subject || '(Không có tiêu đề)';
+    const htmlBody = sanitizeEmailHtml(data.html || '');
+    const textBody = data.text || stripHtmlToText(htmlBody);
+    const fromAddress = data.from_mail || parseFromHeader(data.from || '').address || 'unknown@sender';
+    const fromName =
+      data.from_name || parseFromHeader(data.from || '').name || fromAddress.split('@')[0] || 'Người gửi';
+    const receivedAt = parseLooseDate(data.date);
+    const otpCodes = extractOtpCodes(`${textBody}\n${htmlBody}`, subject);
+    const rawSource = [
+      `Delivered-To: ${address}`,
+      `From: ${data.from || `"${fromName}" <${fromAddress}>`}`,
+      `To: <${data.to || address}>`,
+      `Date: ${data.date || new Date(receivedAt).toUTCString()}`,
+      `Subject: ${subject}`,
+      ...(data.message_id ? [`Message-ID: ${data.message_id}`] : []),
+      `MIME-Version: 1.0`,
+      `Content-Type: text/plain; charset="UTF-8"`,
+      ``,
+      textBody,
+    ].join('\r\n');
+
+    return {
+      id: `tmp_${rawMailId}`,
+      mailboxId,
+      fromName,
+      fromAddress,
+      toAddress: data.to || address,
+      subject,
+      snippet: textBody.slice(0, 140),
+      receivedAt,
+      isRead,
+      otpCodes,
+      textBody,
+      htmlBody,
+      rawSource,
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function fetchRemoteMessages(mb: PersistedMailboxRecord): Promise<EmailDetail[]> {
   if (!mb.l) return [];
   const deleted = new Set(mb.del ?? []);
@@ -383,41 +410,112 @@ async function fetchRemoteMessages(mb: PersistedMailboxRecord): Promise<EmailDet
 
   if (mb.p === 'mailtm' && mb.mt) {
     try {
-      const list = await fetchJson<{
-        'hydra:member'?: Array<{
-          id: string;
-          from?: { name?: string; address?: string };
-          to?: Array<{ address?: string }>;
-          subject?: string;
-          intro?: string;
-          createdAt?: string;
-          seen?: boolean;
-        }>;
-      }>(`${MAILTM_API}/messages`, {
+      const raw = await fetchJson<unknown>(`${MAILTM_API}/messages`, {
         headers: { Authorization: `Bearer ${mb.mt}` },
       });
+      const items = extractHydraItems<{
+        id: string;
+        from?: { name?: string; address?: string };
+        to?: Array<{ address?: string }>;
+        subject?: string;
+        intro?: string;
+        createdAt?: string;
+        seen?: boolean;
+      }>(raw).filter((m) => Boolean(m?.id) && !deleted.has(m.id));
 
-      return (list['hydra:member'] ?? [])
-        .filter((m) => !deleted.has(m.id))
-        .map((item) => {
+      const summaries: EmailDetail[] = items.map((item) => {
+        const subject = item.subject || '(Không có tiêu đề)';
+        const snippet = item.intro || '';
+        return {
+          id: item.id,
+          mailboxId: mb.i,
+          fromName: item.from?.name || item.from?.address?.split('@')[0] || 'Người gửi',
+          fromAddress: item.from?.address || 'unknown@sender',
+          toAddress: item.to?.[0]?.address || mb.a,
+          subject,
+          snippet,
+          receivedAt: item.createdAt || new Date().toISOString(),
+          isRead: Boolean(item.seen) || read.has(item.id),
+          otpCodes: extractOtpCodes(snippet, subject),
+          textBody: snippet,
+          htmlBody: '',
+          rawSource: '',
+        };
+      });
+
+      // Enrich top 3 messages without detected OTP in intro so real OTP codes surface immediately
+      const needsOtpCheck = summaries.filter((m) => m.otpCodes.length === 0).slice(0, 3);
+      await Promise.all(
+        needsOtpCheck.map(async (msg) => {
+          try {
+            const detail = await fetchJson<{ text?: string; html?: string[] }>(
+              `${MAILTM_API}/messages/${encodeURIComponent(msg.id)}`,
+              { headers: { Authorization: `Bearer ${mb.mt}` } }
+            );
+            const htmlStr = Array.isArray(detail.html) ? detail.html.join('\n') : '';
+            const fullText = detail.text || stripHtmlToText(htmlStr);
+            const detected = extractOtpCodes(`${fullText}\n${htmlStr}`, msg.subject);
+            if (detected.length > 0) msg.otpCodes = detected;
+            if (!msg.snippet && fullText) msg.snippet = fullText.slice(0, 140);
+          } catch {
+            // Keep summary as-is
+          }
+        })
+      );
+
+      return summaries;
+    } catch {
+      return [];
+    }
+  }
+
+  if (mb.p === 'tempmail_plus') {
+    try {
+      const data = await fetchJson<{
+        result?: boolean;
+        mail_list?: Array<{
+          mail_id: number | string;
+          from_mail?: string;
+          from_name?: string;
+          subject?: string;
+          time?: string;
+          is_new?: boolean;
+        }>;
+      }>(`${TEMPMAIL_PLUS_API}?email=${encodeURIComponent(mb.a)}&limit=20&epin=`);
+
+      const list = (data.mail_list ?? []).filter(
+        (m) => m.mail_id !== undefined && !deleted.has(`tmp_${m.mail_id}`)
+      );
+
+      // Enrich top 5 newest messages in parallel so snippets and OTP codes appear immediately
+      const enriched = await Promise.all(
+        list.map(async (item, idx) => {
+          const rawId = String(item.mail_id);
+          const id = `tmp_${rawId}`;
+          const isRead = read.has(id) || item.is_new === false;
+          if (idx < 5) {
+            const detail = await fetchTempMailPlusDetail(mb.a, mb.i, rawId, isRead);
+            if (detail) return detail;
+          }
           const subject = item.subject || '(Không có tiêu đề)';
-          const snippet = item.intro || '';
           return {
-            id: item.id,
+            id,
             mailboxId: mb.i,
-            fromName: item.from?.name || item.from?.address?.split('@')[0] || 'Người gửi',
-            fromAddress: item.from?.address || 'unknown@sender',
-            toAddress: item.to?.[0]?.address || mb.a,
+            fromName: item.from_name || item.from_mail?.split('@')[0] || 'Người gửi',
+            fromAddress: item.from_mail || 'unknown@sender',
+            toAddress: mb.a,
             subject,
-            snippet,
-            receivedAt: item.createdAt || new Date().toISOString(),
-            isRead: Boolean(item.seen) || read.has(item.id),
-            otpCodes: extractOtpCodes(snippet, subject),
-            textBody: snippet,
+            snippet: subject,
+            receivedAt: parseLooseDate(item.time),
+            isRead,
+            otpCodes: extractOtpCodes(subject, subject),
+            textBody: '',
             htmlBody: '',
             rawSource: '',
           };
-        });
+        })
+      );
+      return enriched;
     } catch {
       return [];
     }
@@ -484,58 +582,6 @@ async function fetchRemoteMessages(mb: PersistedMailboxRecord): Promise<EmailDet
     }
   }
 
-  if (mb.p === 'guerrilla' && mb.gs) {
-    try {
-      const data = await fetchJson<{
-        list?: Array<{
-          mail_id: string;
-          mail_from: string;
-          mail_subject: string;
-          mail_excerpt: string;
-          mail_timestamp: string;
-          mail_read: string;
-        }>;
-      }>(`${GUERRILLA_API}?f=get_email_list&offset=0&sid_token=${encodeURIComponent(mb.gs)}`);
-
-      return (data.list ?? [])
-        .filter((m) => {
-          const isDefaultPromo =
-            String(m.mail_id) === '1' ||
-            (m.mail_from?.toLowerCase() === 'no-reply@guerrillamail.com' &&
-              m.mail_subject === 'Welcome to Guerrilla Mail');
-          return !isDefaultPromo && !deleted.has(`gm_${m.mail_id}`);
-        })
-        .map((item) => {
-          const id = `gm_${item.mail_id}`;
-          const parsedFrom = parseFromHeader(item.mail_from || 'unknown@sender');
-          const subject = item.mail_subject || '(Không có tiêu đề)';
-          const snippet = stripHtmlToText(item.mail_excerpt || '');
-          const ts = Number(item.mail_timestamp);
-          const receivedAt =
-            Number.isFinite(ts) && ts > 1_000_000_000
-              ? new Date(ts * 1000).toISOString()
-              : new Date().toISOString();
-          return {
-            id,
-            mailboxId: mb.i,
-            fromName: parsedFrom.name,
-            fromAddress: parsedFrom.address,
-            toAddress: mb.a,
-            subject,
-            snippet,
-            receivedAt,
-            isRead: item.mail_read === '1' || read.has(id),
-            otpCodes: extractOtpCodes(snippet, subject),
-            textBody: snippet,
-            htmlBody: '',
-            rawSource: '',
-          };
-        });
-    } catch {
-      return [];
-    }
-  }
-
   return [];
 }
 
@@ -577,9 +623,6 @@ async function persistMailboxCookie(
   if (mb.rd && mb.rd.length > MAX_STORED_IDS) {
     mb.rd = mb.rd.slice(-MAX_STORED_IDS);
   }
-  if (mb.sm && mb.sm.length > MAX_STORED_SAMPLES) {
-    mb.sm = mb.sm.slice(0, MAX_STORED_SAMPLES);
-  }
   const encrypted = await encryptCookiePayload(mb, secret);
   return buildCookieHeader(`${MAILBOX_COOKIE_PREFIX}${mb.i}`, encrypted, 86400, isHttps);
 }
@@ -602,7 +645,6 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
   const secret = env?.MAILBOX_SESSION_SECRET || 'tempmail-studio-cf-edge-default-v1';
   const cookies = parseCookies(request.headers.get('cookie'));
 
-  // Normalize API subpath under /api
   const pathname = url.pathname.replace(/^\/api\/?/, '').replace(/\/+$/, '');
   const segments = pathname ? pathname.split('/').map(decodeURIComponent) : [];
 
@@ -635,54 +677,33 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
       if (body === null) {
         return jsonResponse({ error: 'Dữ liệu gửi lên không hợp lệ.' }, 400);
       }
-      const mode = body.mode === 'domain' ? 'domain' : 'email';
-
-      if (mode === 'email') {
-        try {
-          const created = await createTempMailLolAccount();
-          const [username, domain] = created.address.split('@');
-          const previewId = randomHex(12);
-          const pendingRecord: PendingPreviewRecord = {
-            id: previewId,
-            address: created.address,
-            username,
-            domain,
-            provider: 'tempmail_lol',
-            token: created.token,
-            createdAt: Date.now(),
-          };
-          const encryptedPending = await encryptCookiePayload(pendingRecord, secret);
-          const pendingCookie = buildCookieHeader(
-            PENDING_COOKIE_NAME,
-            encryptedPending,
-            900,
-            isHttps
-          );
-          const payload: GeneratedEmailPreview = {
-            address: created.address,
-            username,
-            domain,
-            provider: 'tempmail_lol',
-            pregeneratedToken: previewId,
-          };
-          return jsonResponse(payload, 200, [pendingCookie]);
-        } catch {
-          // Fall through to Mail.tm / Guerrilla preview
-        }
-      }
 
       const domains = await fetchLiveDomains();
-      const preferred = domains[0] ?? {
-        domain: 'sharklasers.com',
-        provider: 'guerrilla' as MailProvider,
-        active: true,
-      };
+      const mailtmDomain = domains.find((d) => d.provider === 'mailtm');
       const username = generateFakerUsername();
+
+      // Prefer clean 2-level rotating domain from Mail.tm first, then TempMail.plus
+      if (mailtmDomain) {
+        const payload: GeneratedEmailPreview = {
+          address: `${username}@${mailtmDomain.domain}`,
+          username,
+          domain: mailtmDomain.domain,
+          provider: 'mailtm',
+        };
+        return jsonResponse(payload);
+      }
+
+      const plusDomain =
+        domains[Math.floor(Math.random() * Math.max(1, domains.length))] ?? {
+          domain: 'mailto.plus',
+          provider: 'tempmail_plus' as MailProvider,
+          active: true,
+        };
       const payload: GeneratedEmailPreview = {
-        address: `${username}@${preferred.domain}`,
+        address: `${username}@${plusDomain.domain}`,
         username,
-        domain: preferred.domain,
-        provider: preferred.provider,
+        domain: plusDomain.domain,
+        provider: plusDomain.provider,
       };
       return jsonResponse(payload);
     }
@@ -699,44 +720,26 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
       const setCookies: string[] = [];
       let created: PersistedMailboxRecord | null = null;
 
-      // Case A: Activating a pregenerated TempMail.lol system email
+      // Case A: Pre-generated token if present
       if (body.pregeneratedToken) {
         const rawPending = cookies.get(PENDING_COOKIE_NAME);
         if (rawPending) {
           const pending = await decryptCookiePayload<PendingPreviewRecord>(rawPending, secret);
-          if (pending && pending.id === body.pregeneratedToken) {
+          if (pending && pending.id === body.pregeneratedToken && pending.token) {
             created = {
               i: `mb_${randomHex(8)}`,
               a: pending.address,
               u: pending.username,
               d: pending.domain,
-              p: 'tempmail_lol',
+              p: pending.provider,
               c: new Date().toISOString(),
               l: true,
-              lt: pending.token,
+              lt: pending.provider === 'tempmail_lol' ? pending.token : undefined,
+              mt: pending.provider === 'mailtm' ? pending.token : undefined,
+              ma: pending.accountId,
             };
             setCookies.push(buildCookieHeader(PENDING_COOKIE_NAME, '', 0, isHttps));
           }
-        }
-      }
-
-      // Case B: Instant Email mode without pre-clicking Generate email
-      if (!created && mode === 'email' && !body.email?.trim()) {
-        try {
-          const tml = await createTempMailLolAccount();
-          const [username, domain] = tml.address.split('@');
-          created = {
-            i: `mb_${randomHex(8)}`,
-            a: tml.address,
-            u: username,
-            d: domain,
-            p: 'tempmail_lol',
-            c: new Date().toISOString(),
-            l: true,
-            lt: tml.token,
-          };
-        } catch {
-          // Fall through to Mail.tm / GuerrillaMail
         }
       }
 
@@ -746,11 +749,16 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
             ? (body.email ?? '').trim() || generateFakerUsername()
             : (body.username ?? '').trim() || generateFakerUsername();
 
-        const fallbackDomain =
-          body.domain && body.domain !== 'random'
-            ? body.domain
+        // For random domain: prioritize clean Mail.tm domain first, then clean 2-level TempMail.plus domains
+        const mailtmDomain = domains.find((d) => d.provider === 'mailtm')?.domain;
+        const randomDomain =
+          mode === 'email' && mailtmDomain
+            ? mailtmDomain
             : domains[Math.floor(Math.random() * Math.max(1, domains.length))]?.domain ||
-              'sharklasers.com';
+              'mailto.plus';
+
+        const fallbackDomain =
+          body.domain && body.domain !== 'random' ? body.domain : randomDomain;
 
         const parsed = parseEmailInput(rawInput, fallbackDomain);
         if (!parsed.valid || !parsed.username || !parsed.domain) {
@@ -776,6 +784,7 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
           Boolean(body.domain && body.domain !== 'random') &&
           Boolean(body.username?.trim() || body.email?.trim());
 
+        // Provider 1: Mail.tm (clean 2-level rotating .com domain)
         if (domainEntry?.provider === 'mailtm') {
           try {
             const mt = await createMailTmAccount(username, requestedDomain);
@@ -803,37 +812,53 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
           }
         }
 
+        // Provider 2: TempMail.plus (7 clean 2-level domains, stateless across all Edge IPs)
         if (!created) {
+          const targetPlusDomain = TEMPMAIL_PLUS_DOMAINS.includes(requestedDomain)
+            ? requestedDomain
+            : TEMPMAIL_PLUS_DOMAINS[Math.floor(Math.random() * TEMPMAIL_PLUS_DOMAINS.length)];
+          const candidateAddr = `${username}@${targetPlusDomain}`;
           try {
-            const targetDomain =
-              domainEntry?.provider === 'guerrilla' ? requestedDomain : 'sharklasers.com';
-            const gm = await createGuerrillaAccount(username, targetDomain);
-            const [gmUser, gmDom] = gm.address.split('@');
-            created = {
-              i: id,
-              a: gm.address,
-              u: gmUser,
-              d: gmDom,
-              p: 'guerrilla',
-              c: new Date().toISOString(),
-              l: true,
-              gs: gm.sid,
-            };
+            const check = await fetchJson<{ result?: boolean }>(
+              `${TEMPMAIL_PLUS_API}?email=${encodeURIComponent(candidateAddr)}&limit=1&epin=`
+            );
+            if (check?.result !== false) {
+              created = {
+                i: id,
+                a: candidateAddr,
+                u: username,
+                d: targetPlusDomain,
+                p: 'tempmail_plus',
+                c: new Date().toISOString(),
+                l: true,
+              };
+            }
           } catch {
-            // Final offline fallback
+            // Fall through to TempMail.lol backup
           }
         }
 
+        // Provider 3: TempMail.lol backup (token-authenticated)
         if (!created) {
-          created = {
-            i: id,
-            a: `${username}@${requestedDomain}`,
-            u: username,
-            d: requestedDomain,
-            p: 'local',
-            c: new Date().toISOString(),
-            l: false,
-          };
+          try {
+            const tml = await createTempMailLolAccount();
+            const [tmlUser, tmlDom] = tml.address.split('@');
+            created = {
+              i: id,
+              a: tml.address,
+              u: tmlUser,
+              d: tmlDom,
+              p: 'tempmail_lol',
+              c: new Date().toISOString(),
+              l: true,
+              lt: tml.token,
+            };
+          } catch {
+            return jsonResponse(
+              { error: 'Không thể kết nối máy chủ nhận email thực lúc này. Vui lòng thử lại sau giây lát.' },
+              502
+            );
+          }
         }
       }
 
@@ -880,14 +905,13 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
 
       const remoteMessages = await fetchRemoteMessages(mb);
       const remoteUnread = remoteMessages.filter((m) => !m.isRead).length;
-      const sampleDetails = getActiveSampleDetails(mb);
-      const merged = [...sampleDetails, ...remoteMessages].sort(
+      const sorted = remoteMessages.sort(
         (a, b) => Date.parse(b.receivedAt) - Date.parse(a.receivedAt)
       );
 
       return jsonResponse({
-        mailbox: toPublicMailbox(mb, remoteMessages.length, remoteUnread),
-        messages: merged.map(toSummary),
+        mailbox: toPublicMailbox(mb, sorted.length, remoteUnread),
+        messages: sorted.map(toSummary),
       });
     }
 
@@ -915,17 +939,6 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
         mb.rd = Array.from(readSet);
         return [await persistMailboxCookie(mb, secret, isHttps)];
       };
-
-      // Check sample test messages first
-      const deletedSet = new Set(mb.del ?? []);
-      const sampleMeta = (mb.sm ?? []).find(
-        (s) => s.id === messageId && !deletedSet.has(s.id)
-      );
-      if (sampleMeta) {
-        const setCookies = await markReadAndPersist();
-        const detail = buildSampleDetail(mb, sampleMeta);
-        return jsonResponse({ message: { ...detail, isRead: true } }, 200, setCookies);
-      }
 
       // Mail.tm detail + raw source
       if (mb.p === 'mailtm' && mb.mt) {
@@ -1002,6 +1015,16 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
         }
       }
 
+      // TempMail.plus detail
+      if (mb.p === 'tempmail_plus' && messageId.startsWith('tmp_')) {
+        const rawMailId = messageId.slice(4);
+        const detail = await fetchTempMailPlusDetail(mb.a, mb.i, rawMailId, true);
+        if (detail) {
+          const setCookies = await markReadAndPersist();
+          return jsonResponse({ message: detail }, 200, setCookies);
+        }
+      }
+
       // TempMail.lol detail
       if (mb.p === 'tempmail_lol' && mb.lt) {
         const all = await fetchRemoteMessages(mb);
@@ -1009,59 +1032,6 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
         if (hit) {
           const setCookies = await markReadAndPersist();
           return jsonResponse({ message: { ...hit, isRead: true } }, 200, setCookies);
-        }
-      }
-
-      // GuerrillaMail detail
-      if (mb.p === 'guerrilla' && mb.gs && messageId.startsWith('gm_')) {
-        const rawId = messageId.slice(3);
-        try {
-          const data = await fetchJson<{
-            mail_from?: string;
-            mail_subject?: string;
-            mail_body?: string;
-            mail_timestamp?: string;
-          }>(
-            `${GUERRILLA_API}?f=fetch_email&email_id=${encodeURIComponent(rawId)}&sid_token=${encodeURIComponent(mb.gs)}`
-          );
-          const parsedFrom = parseFromHeader(data.mail_from || 'unknown@sender');
-          const subject = data.mail_subject || '(Không có tiêu đề)';
-          const htmlBody = sanitizeEmailHtml(data.mail_body || '');
-          const textBody = stripHtmlToText(htmlBody);
-          const ts = Number(data.mail_timestamp);
-          const receivedAt =
-            Number.isFinite(ts) && ts > 1_000_000_000
-              ? new Date(ts * 1000).toISOString()
-              : new Date().toISOString();
-          const rawSource = [
-            `Delivered-To: ${mb.a}`,
-            `From: ${data.mail_from || ''}`,
-            `To: <${mb.a}>`,
-            `Date: ${new Date(receivedAt).toUTCString()}`,
-            `Subject: ${subject}`,
-            ``,
-            textBody,
-          ].join('\r\n');
-
-          const setCookies = await markReadAndPersist();
-          const full: EmailDetail = {
-            id: messageId,
-            mailboxId: mb.i,
-            fromName: parsedFrom.name,
-            fromAddress: parsedFrom.address,
-            toAddress: mb.a,
-            subject,
-            snippet: textBody.slice(0, 140),
-            receivedAt,
-            isRead: true,
-            otpCodes: extractOtpCodes(`${textBody}\n${htmlBody}`, subject),
-            textBody,
-            htmlBody,
-            rawSource,
-          };
-          return jsonResponse({ message: full }, 200, setCookies);
-        } catch {
-          return jsonResponse({ error: 'Không thể tải nội dung thư.' }, 404);
         }
       }
 
@@ -1088,58 +1058,23 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
       const deletedSet = new Set(mb.del ?? []);
       deletedSet.add(messageId);
       mb.del = Array.from(deletedSet);
-      mb.sm = (mb.sm ?? []).filter((s) => s.id !== messageId);
 
-      if (mb.p === 'mailtm' && mb.mt && !messageId.startsWith('sample_')) {
+      if (mb.p === 'mailtm' && mb.mt) {
         fetch(`${MAILTM_API}/messages/${encodeURIComponent(messageId)}`, {
           method: 'DELETE',
           headers: { Authorization: `Bearer ${mb.mt}` },
           signal: AbortSignal.timeout(4000),
         }).catch(() => {});
-      } else if (mb.p === 'guerrilla' && mb.gs && messageId.startsWith('gm_')) {
-        const rawId = messageId.slice(3);
+      } else if (mb.p === 'tempmail_plus' && messageId.startsWith('tmp_')) {
+        const rawMailId = messageId.slice(4);
         fetch(
-          `${GUERRILLA_API}?f=del_email&email_ids[]=${encodeURIComponent(rawId)}&sid_token=${encodeURIComponent(mb.gs)}`,
-          { signal: AbortSignal.timeout(4000) }
+          `${TEMPMAIL_PLUS_API}/${encodeURIComponent(rawMailId)}?email=${encodeURIComponent(mb.a)}&epin=`,
+          { method: 'DELETE', signal: AbortSignal.timeout(4000) }
         ).catch(() => {});
       }
 
       const updatedCookie = await persistMailboxCookie(mb, secret, isHttps);
       return jsonResponse({ deleted: true, messageId }, 200, [updatedCookie]);
-    }
-
-    // 9. POST /api/mailboxes/:id/test-email
-    if (
-      method === 'POST' &&
-      segments.length === 3 &&
-      segments[0] === 'mailboxes' &&
-      segments[2] === 'test-email'
-    ) {
-      const id = segments[1];
-      if (!SAFE_ID_RE.test(id)) {
-        return jsonResponse({ error: 'ID hộp thư không hợp lệ.' }, 400);
-      }
-      const mb = await loadMailboxFromCookies(cookies, id, secret);
-      if (!mb) {
-        return jsonResponse({ error: 'Không tìm thấy hộp thư.' }, 404);
-      }
-
-      const variant = mb.sc ?? 0;
-      mb.sc = variant + 1;
-      const meta: SampleMeta = {
-        id: `sample_${randomHex(6)}`,
-        v: variant,
-        t: new Date().toISOString(),
-      };
-      mb.sm = [meta, ...(mb.sm ?? [])];
-
-      const detail = buildSampleDetail(mb, meta);
-      const updatedCookie = await persistMailboxCookie(mb, secret, isHttps);
-      return jsonResponse(
-        { message: toSummary(detail), mailbox: toPublicMailbox(mb) },
-        201,
-        [updatedCookie]
-      );
     }
 
     return jsonResponse({ error: 'API endpoint không tồn tại.' }, 404);

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Check, Copy, Mail, Search, Send } from 'lucide-react';
+import { Check, Copy, Mail, Search } from 'lucide-react';
 import type { EmailSummary, Mailbox } from '../types/mail';
 import { formatShortTime, getSenderInitial } from '../utils/tempMailLogic';
 
@@ -8,11 +8,9 @@ interface MessageListProps {
   messages: EmailSummary[];
   selectedMessageId: string | null;
   isLoadingMessages: boolean;
-  isSendingSample: boolean;
   copiedValue: string | null;
   onSelectMessage: (messageId: string) => void;
   onCopyText: (value: string, label?: string) => void;
-  onSendSampleEmail: () => void;
 }
 
 export function MessageList({
@@ -20,11 +18,9 @@ export function MessageList({
   messages,
   selectedMessageId,
   isLoadingMessages,
-  isSendingSample,
   copiedValue,
   onSelectMessage,
   onCopyText,
-  onSendSampleEmail,
 }: MessageListProps) {
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -101,35 +97,22 @@ export function MessageList({
           </button>
         </div>
 
-        <div className="flex items-center gap-2">
-          <div className="relative flex-1 min-w-0">
-            <Search
-              className="w-3.5 h-3.5 text-[#949CA9] absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
-              aria-hidden="true"
-            />
-            <label htmlFor="search-messages" className="sr-only">
-              Tìm thư hoặc mã OTP
-            </label>
-            <input
-              id="search-messages"
-              type="search"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Tìm thư hoặc mã OTP..."
-              className="w-full pl-8 pr-2.5 py-1.5 rounded-lg bg-[#F4F6F9] border border-transparent focus:bg-white focus:border-[#007AFF] focus:outline-none text-[12.5px] text-[#1D1D1F] placeholder:text-[#949CA9] transition-colors"
-            />
-          </div>
-
-          <button
-            type="button"
-            onClick={onSendSampleEmail}
-            disabled={isSendingSample}
-            title="Nhận thư xác minh OTP mẫu để kiểm thử"
-            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#EEF4FF] hover:bg-[#E1ECFF] text-[#0066D6] text-[12px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-[#007AFF]"
-          >
-            <Send className="w-3 h-3" />
-            <span>{isSendingSample ? 'Đang gửi...' : 'Thư thử OTP'}</span>
-          </button>
+        <div className="relative">
+          <Search
+            className="w-3.5 h-3.5 text-[#949CA9] absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
+            aria-hidden="true"
+          />
+          <label htmlFor="search-messages" className="sr-only">
+            Tìm thư hoặc mã OTP
+          </label>
+          <input
+            id="search-messages"
+            type="search"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Tìm thư hoặc mã OTP..."
+            className="w-full pl-8 pr-2.5 py-1.5 rounded-lg bg-[#F4F6F9] border border-transparent focus:bg-white focus:border-[#007AFF] focus:outline-none text-[12.5px] text-[#1D1D1F] placeholder:text-[#949CA9] transition-colors"
+          />
         </div>
       </div>
 
@@ -151,19 +134,10 @@ export function MessageList({
         <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
           <Mail className="w-10 h-10 text-[#CBD0D8] stroke-[1.4]" aria-hidden="true" />
           <h3 className="mt-3 text-[14.5px] font-semibold text-[#525864]">Đang chờ thư đến</h3>
-          <p className="mt-1.5 text-[12.5px] text-[#949CA9] max-w-[250px] leading-relaxed">
-            Gửi email bất kỳ tới địa chỉ trên để nhận trực tiếp, hoặc bấm nút bên dưới để nhận thư
-            xác nhận OTP mẫu.
+          <p className="mt-1.5 text-[12.5px] text-[#949CA9] max-w-[260px] leading-relaxed">
+            Gửi email hoặc mã xác minh OTP tới địa chỉ trên — hộp thư tự động làm mới mỗi 5 giây để
+            hiển thị thư thực ngay khi đến.
           </p>
-          <button
-            type="button"
-            onClick={onSendSampleEmail}
-            disabled={isSendingSample}
-            className="mt-4 inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[#D4DAE3] bg-white hover:bg-[#F7F9FC] text-[12.5px] font-semibold text-[#1D1D1F] transition-colors whitespace-nowrap cursor-pointer focus-visible:outline-2 focus-visible:outline-[#007AFF]"
-          >
-            <Send className="w-3.5 h-3.5 text-[#007AFF]" />
-            <span>{isSendingSample ? 'Đang gửi...' : 'Nhận thư thử OTP (Meta)'}</span>
-          </button>
         </div>
       ) : filteredMessages.length === 0 ? (
         <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
