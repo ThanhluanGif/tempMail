@@ -1,12 +1,25 @@
-import { onRequest } from './functions/api/[[path]]';
+import {
+  onRequest,
+  storeIncomingCloudflareEmail,
+  type CloudflareKvNamespace,
+} from './functions/api/[[path]]';
 
 interface AssetFetcher {
   fetch(request: Request): Promise<Response>;
 }
 
+interface ForwardableEmailMessage {
+  readonly from: string;
+  readonly to: string;
+  readonly raw: ReadableStream<Uint8Array>;
+  readonly rawSize?: number;
+}
+
 export interface WorkerEnv {
   ASSETS?: AssetFetcher;
   MAILBOX_SESSION_SECRET?: string;
+  MAILBOX_KV?: CloudflareKvNamespace;
+  CUSTOM_DOMAINS?: string;
 }
 
 export default {
@@ -26,5 +39,11 @@ export default {
     }
 
     return new Response('Not Found', { status: 404 });
+  },
+
+  async email(message: ForwardableEmailMessage, env: WorkerEnv): Promise<void> {
+    if (!env.MAILBOX_KV) return;
+    const rawEmail = await new Response(message.raw).text();
+    await storeIncomingCloudflareEmail(env, rawEmail, message.from, message.to);
   },
 };

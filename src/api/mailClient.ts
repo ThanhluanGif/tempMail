@@ -92,16 +92,26 @@ export async function deleteMailbox(mailboxId: string): Promise<void> {
 
 export async function fetchMessages(
   mailboxId: string
-): Promise<{ mailbox: Mailbox; messages: EmailSummary[] }> {
-  const res = await apiRequest<{ mailbox?: Mailbox; messages?: EmailSummary[] }>(
-    `/api/mailboxes/${encodeURIComponent(mailboxId)}/messages`
-  );
+): Promise<{
+  mailbox: Mailbox;
+  messages: EmailSummary[];
+  syncError?: string;
+  rateLimited?: boolean;
+}> {
+  const res = await apiRequest<{
+    mailbox?: Mailbox;
+    messages?: EmailSummary[];
+    syncError?: string;
+    rateLimited?: boolean;
+  }>(`/api/mailboxes/${encodeURIComponent(mailboxId)}/messages`);
   if (!res.mailbox || typeof res.mailbox.id !== 'string' || !Array.isArray(res.messages)) {
     throw new Error('Dữ liệu hộp thư không hợp lệ.');
   }
   return {
     mailbox: res.mailbox,
     messages: res.messages.filter((m): m is EmailSummary => Boolean(m && typeof m.id === 'string')),
+    syncError: typeof res.syncError === 'string' ? res.syncError : undefined,
+    rateLimited: Boolean(res.rateLimited),
   };
 }
 

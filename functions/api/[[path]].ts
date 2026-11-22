@@ -5,6 +5,7 @@ import {
   sanitizeEmailHtml,
   stripHtmlToText,
 } from '../../src/utils/tempMailLogic';
+import { parseRawMimeEmail } from '../../src/utils/mimeParser';
 import type {
   CreateMailboxPayload,
   DomainInfo,
@@ -15,14 +16,28 @@ import type {
   MailProvider,
 } from '../../src/types/mail';
 
-interface CloudflarePagesEnv {
+export interface CloudflareKvNamespace {
+  get(key: string): Promise<string | null>;
+  put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
+  delete(key: string): Promise<void>;
+}
+
+export interface CloudflarePagesEnv {
   MAILBOX_SESSION_SECRET?: string;
+  MAILBOX_KV?: CloudflareKvNamespace;
+  CUSTOM_DOMAINS?: string;
 }
 
 interface CloudflarePagesContext {
   request: Request;
   env: CloudflarePagesEnv;
   params: Record<string, string | string[]>;
+}
+
+interface RemoteFetchResult {
+  messages: EmailDetail[];
+  syncError?: string;
+  rateLimited?: boolean;
 }
 
 interface PersistedMailboxRecord {
@@ -54,6 +69,7 @@ interface PendingPreviewRecord {
 const REQUEST_TIMEOUT_MS = 7000;
 const MAILTM_API = 'https://api.mail.tm';
 const TEMPMAIL_PLUS_API = 'https://tempmail.plus/api/mails';
+const INBOXES_API = 'https://inboxes.com/api/v2';
 const TEMPMAIL_LOL_API = 'https://api.tempmail.lol/v2';
 
 const TEMPMAIL_PLUS_DOMAINS = [
@@ -64,6 +80,24 @@ const TEMPMAIL_PLUS_DOMAINS = [
   'merepost.com',
   'chitthi.in',
   'any.pink',
+];
+
+const INBOXES_FALLBACK_DOMAINS = [
+  'blondmail.com',
+  'chapsmail.com',
+  'clowmail.com',
+  'dropjar.com',
+  'fivermail.com',
+  'getairmail.com',
+  'getmule.com',
+  'gimpmail.com',
+  'givmail.com',
+  'guysmail.com',
+  'inboxbear.com',
+  'replyloop.com',
+  'tafmail.com',
+  'temptami.com',
+  'tupmail.com',
 ];
 
 const SAFE_ID_RE = /^[a-zA-Z0-9._-]{2,128}$/;
@@ -195,13 +229,18 @@ function jsonResponse(
   return new Response(JSON.stringify(body), { status, headers });
 }
 
+const BROWSER_USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
+    cache: 'no-store',
     ...init,
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     headers: {
       Accept: 'application/ld+json, application/json, */*',
-      'User-Agent': 'Mozilla/5.0 (compatible; TempMailApp/1.0)',
+      'User-Agent': BROWSER_USER_AGENT,
+      'Cache-Control': 'no-cache',
       ...(init?.headers ?? {}),
     },
   });
@@ -216,6 +255,91 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+function classifyUpstreamError(err: unknown): { syncError: string; rateLimited: boolean } {
+  const status = (err as { status?: number })?.status;
+  if (status === 429) {
+    return {
+      rateLimited: true,
+      syncError: 'Máy chủ tên miền tạm giới hạn tần suất (429) — đang tự động thử lại...',
+    };
+  }
+  if (status === 403 || status === 401) {
+    return {
+      rateLimited: false,
+      syncError: 'Máy chủ tên miền từ chối kết nối tạm thời — thử đổi tên miền khác trong tab Domain.',
+    };
+  }
+  return {
+    rateLimited: false,
+    syncError: 'Không thể đồng bộ hộp thư lúc này — hệ thống sẽ tự động thử lại.',
+  };
+}
+
+function getConfiguredCustomDomains(env?: CloudflarePagesEnv): string[] {
+  const raw = env?.CUSTOM_DOMAINS || '';
+  if (!raw.trim() || !env?.MAILBOX_KV) return [];
+  return raw
+    .split(',')
+    .map((d) => d.trim().toLowerCase().replace(/^@/, ''))
+    .filter((d) => Boolean(d) && d.includes('.'));
+}
+
+export async function storeIncomingCloudflareEmail(
+  env: CloudflarePagesEnv,
+  rawEmail: string,
+  envelopeFrom: string,
+  envelopeTo: string
+): Promise<{ stored: boolean; id?: string; otpCodes?: string[] }> {
+  if (!env?.MAILBOX_KV) return { stored: false };
+  const parsed = parseRawMimeEmail(rawEmail, envelopeFrom, envelopeTo);
+  const recipient = (envelopeTo || parsed.toAddress).trim().toLowerCase();
+  if (!recipient || !recipient.includes('@')) return { stored: false };
+
+  const id = `cf_${randomHex(8)}`;
+  const htmlBody = sanitizeEmailHtml(parsed.htmlBody);
+  const textBody = parsed.textBody || stripHtmlToText(htmlBody);
+  const otpCodes = extractOtpCodes(`${textBody}\n${htmlBody}`, parsed.subject);
+  const detail: EmailDetail = {
+    id,
+    mailboxId: recipient,
+    fromName: parsed.fromName,
+    fromAddress: parsed.fromAddress,
+    toAddress: recipient,
+    subject: parsed.subject,
+    snippet: textBody.replace(/\s+/g, ' ').slice(0, 140) || parsed.subject,
+    receivedAt: parsed.receivedAt,
+    isRead: false,
+    otpCodes,
+    textBody,
+    htmlBody,
+    rawSource: parsed.rawSource,
+  };
+
+  const ttl = 86400;
+  await env.MAILBOX_KV.put(`msg:${recipient}:${id}`, JSON.stringify(detail), {
+    expirationTtl: ttl,
+  });
+
+  const indexKey = `inbox:${recipient}`;
+  const rawIndex = await env.MAILBOX_KV.get(indexKey);
+  let existingSummaries: EmailSummary[] = [];
+  if (rawIndex) {
+    try {
+      const arr = JSON.parse(rawIndex);
+      if (Array.isArray(arr)) existingSummaries = arr as EmailSummary[];
+    } catch {
+      existingSummaries = [];
+    }
+  }
+
+  const nextSummaries = [toSummary(detail), ...existingSummaries.filter((m) => m.id !== id)].slice(
+    0,
+    30
+  );
+  await env.MAILBOX_KV.put(indexKey, JSON.stringify(nextSummaries), { expirationTtl: ttl });
+  return { stored: true, id, otpCodes };
+}
+
 function extractHydraItems<T>(payload: unknown): T[] {
   if (Array.isArray(payload)) return payload as T[];
   if (payload && typeof payload === 'object') {
@@ -226,30 +350,80 @@ function extractHydraItems<T>(payload: unknown): T[] {
   return [];
 }
 
-async function fetchLiveDomains(): Promise<DomainInfo[]> {
+async function fetchLiveDomains(env?: CloudflarePagesEnv): Promise<DomainInfo[]> {
   const domains: DomainInfo[] = [];
-  try {
-    const raw = await fetchJson<unknown>(`${MAILTM_API}/domains`);
-    const members = extractHydraItems<{ domain?: string; isActive?: boolean }>(raw);
+  const seen = new Set<string>();
+  const addDomain = (domain: string, provider: MailProvider) => {
+    const clean = domain.trim().toLowerCase();
+    if (!clean || seen.has(clean)) return;
+    seen.add(clean);
+    domains.push({ domain: clean, provider, active: true });
+  };
+
+  // Custom Cloudflare Email Routing domains take top priority (private, zero blocklist)
+  for (const custom of getConfiguredCustomDomains(env)) {
+    addDomain(custom, 'cloudflare_email');
+  }
+
+  // Query Mail.tm and Inboxes.com in parallel for fast domain discovery
+  const [mailtmResult, inboxesResult] = await Promise.allSettled([
+    fetchJson<unknown>(`${MAILTM_API}/domains`),
+    fetchJson<{ domains?: Array<{ qdn?: string }> }>(`${INBOXES_API}/domain`),
+  ]);
+
+  if (mailtmResult.status === 'fulfilled') {
+    const members = extractHydraItems<{ domain?: string; isActive?: boolean }>(mailtmResult.value);
     for (const item of members) {
       if (item.domain && item.isActive !== false) {
-        domains.push({
-          domain: item.domain.toLowerCase(),
-          provider: 'mailtm',
-          active: true,
-        });
+        addDomain(item.domain, 'mailtm');
       }
     }
-  } catch {
-    // Mail.tm temporarily unavailable; TempMail.plus domains remain active
   }
 
   for (const d of TEMPMAIL_PLUS_DOMAINS) {
-    if (!domains.some((item) => item.domain === d)) {
-      domains.push({ domain: d, provider: 'tempmail_plus', active: true });
+    addDomain(d, 'tempmail_plus');
+  }
+
+  let addedInboxes = 0;
+  if (inboxesResult.status === 'fulfilled') {
+    for (const item of inboxesResult.value?.domains ?? []) {
+      if (item.qdn && item.qdn.includes('.')) {
+        addDomain(item.qdn, 'inboxes');
+        addedInboxes++;
+      }
     }
   }
+  if (addedInboxes === 0) {
+    for (const d of INBOXES_FALLBACK_DOMAINS) {
+      addDomain(d, 'inboxes');
+    }
+  }
+
   return domains;
+}
+
+/**
+ * Picks a reliable default OTP domain:
+ * 1. Private Cloudflare Email Routing domain (if configured)
+ * 2. Fresh rotating Mail.tm or un-throttled TempMail.plus domains
+ * 3. Remaining domains as fallback
+ */
+function pickPreferredOtpDomain(domains: DomainInfo[]): DomainInfo {
+  const custom = domains.filter((d) => d.provider === 'cloudflare_email');
+  if (custom.length > 0) {
+    return custom[Math.floor(Math.random() * custom.length)];
+  }
+  const primary = domains.filter((d) => d.provider === 'mailtm' || d.provider === 'tempmail_plus');
+  if (primary.length > 0) {
+    return primary[Math.floor(Math.random() * primary.length)];
+  }
+  return (
+    domains[Math.floor(Math.random() * Math.max(1, domains.length))] ?? {
+      domain: 'mailto.plus',
+      provider: 'tempmail_plus',
+      active: true,
+    }
+  );
 }
 
 function parseFromHeader(raw: string): { name: string; address: string } {
@@ -324,19 +498,40 @@ async function createMailTmAccount(
   return { accountId: account.id, token: tokenRes.token, address: account.address };
 }
 
-async function createTempMailLolAccount(): Promise<{ address: string; token: string }> {
-  const data = await fetchJson<{ address?: string; token?: string }>(
-    `${TEMPMAIL_LOL_API}/inbox/create`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
+function sanitizeLolPrefix(raw?: string): string | undefined {
+  if (!raw) return undefined;
+  const clean = raw.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 14);
+  return clean.length >= 2 ? clean : undefined;
+}
+
+async function createTempMailLolAccount(
+  prefix?: string
+): Promise<{ address: string; token: string }> {
+  const cleanPrefix = sanitizeLolPrefix(prefix);
+  const attempts: Array<Record<string, unknown>> = [
+    { community: true, ...(cleanPrefix ? { prefix: cleanPrefix } : {}) },
+    { ...(cleanPrefix ? { prefix: cleanPrefix } : {}) },
+  ];
+
+  let lastErr: unknown;
+  for (const payload of attempts) {
+    try {
+      const data = await fetchJson<{ address?: string; token?: string }>(
+        `${TEMPMAIL_LOL_API}/inbox/create`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        }
+      );
+      if (data.address && data.token) {
+        return { address: data.address.toLowerCase(), token: data.token };
+      }
+    } catch (err) {
+      lastErr = err;
     }
-  );
-  if (!data.address || !data.token) {
-    throw new Error('TempMail.lol did not return an inbox');
   }
-  return { address: data.address.toLowerCase(), token: data.token };
+  throw lastErr instanceof Error ? lastErr : new Error('TempMail.lol did not return an inbox');
 }
 
 async function fetchTempMailPlusDetail(
@@ -403,10 +598,95 @@ async function fetchTempMailPlusDetail(
   }
 }
 
-async function fetchRemoteMessages(mb: PersistedMailboxRecord): Promise<EmailDetail[]> {
-  if (!mb.l) return [];
+async function fetchInboxesMessageDetail(
+  address: string,
+  mailboxId: string,
+  rawUid: string,
+  isRead: boolean
+): Promise<EmailDetail | null> {
+  try {
+    const data = await fetchJson<{
+      uid?: string;
+      f?: string;
+      s?: string;
+      cr?: string;
+      r?: number;
+      html?: string;
+      text?: string;
+    }>(`${INBOXES_API}/message/${encodeURIComponent(rawUid)}`);
+
+    if (!data || !data.uid) return null;
+
+    const subject = data.s || '(Không có tiêu đề)';
+    const htmlBody = sanitizeEmailHtml(data.html || '');
+    const textBody = data.text || stripHtmlToText(htmlBody);
+    const parsedFrom = parseFromHeader(data.f || 'unknown@sender');
+    const receivedAt = data.cr
+      ? parseLooseDate(data.cr)
+      : data.r
+        ? new Date(data.r > 1e12 ? data.r : data.r * 1000).toISOString()
+        : new Date().toISOString();
+    const otpCodes = extractOtpCodes(`${textBody}\n${htmlBody}`, subject);
+    const rawSource = [
+      `Delivered-To: ${address}`,
+      `From: ${data.f || `"${parsedFrom.name}" <${parsedFrom.address}>`}`,
+      `To: <${address}>`,
+      `Date: ${new Date(receivedAt).toUTCString()}`,
+      `Subject: ${subject}`,
+      `MIME-Version: 1.0`,
+      `Content-Type: text/plain; charset="UTF-8"`,
+      ``,
+      textBody,
+    ].join('\r\n');
+
+    return {
+      id: `inb_${rawUid}`,
+      mailboxId,
+      fromName: parsedFrom.name,
+      fromAddress: parsedFrom.address,
+      toAddress: address,
+      subject,
+      snippet: textBody.replace(/\s+/g, ' ').slice(0, 140),
+      receivedAt,
+      isRead,
+      otpCodes,
+      textBody,
+      htmlBody,
+      rawSource,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchRemoteMessages(
+  mb: PersistedMailboxRecord,
+  env?: CloudflarePagesEnv
+): Promise<RemoteFetchResult> {
+  if (!mb.l) return { messages: [] };
   const deleted = new Set(mb.del ?? []);
   const read = new Set(mb.rd ?? []);
+
+  if (mb.p === 'cloudflare_email' && env?.MAILBOX_KV) {
+    try {
+      const rawIndex = await env.MAILBOX_KV.get(`inbox:${mb.a.toLowerCase()}`);
+      if (!rawIndex) return { messages: [] };
+      const parsed = JSON.parse(rawIndex) as EmailSummary[];
+      const filtered = (Array.isArray(parsed) ? parsed : [])
+        .filter((m) => Boolean(m?.id) && !deleted.has(m.id))
+        .map((m) => ({
+          ...m,
+          mailboxId: mb.i,
+          isRead: m.isRead || read.has(m.id),
+          textBody: m.snippet,
+          htmlBody: '',
+          rawSource: '',
+        }));
+      return { messages: filtered };
+    } catch (err) {
+      return { messages: [], ...classifyUpstreamError(err) };
+    }
+  }
 
   if (mb.p === 'mailtm' && mb.mt) {
     try {
@@ -443,8 +723,10 @@ async function fetchRemoteMessages(mb: PersistedMailboxRecord): Promise<EmailDet
         };
       });
 
-      // Enrich top 3 messages without detected OTP in intro so real OTP codes surface immediately
-      const needsOtpCheck = summaries.filter((m) => m.otpCodes.length === 0).slice(0, 3);
+      // Enrich at most 2 newest messages without OTP in intro (keep OTP visible even after opening)
+      const needsOtpCheck = summaries
+        .filter((m) => m.otpCodes.length === 0)
+        .slice(0, 2);
       await Promise.all(
         needsOtpCheck.map(async (msg) => {
           try {
@@ -463,9 +745,9 @@ async function fetchRemoteMessages(mb: PersistedMailboxRecord): Promise<EmailDet
         })
       );
 
-      return summaries;
-    } catch {
-      return [];
+      return { messages: summaries };
+    } catch (err) {
+      return { messages: [], ...classifyUpstreamError(err) };
     }
   }
 
@@ -487,13 +769,13 @@ async function fetchRemoteMessages(mb: PersistedMailboxRecord): Promise<EmailDet
         (m) => m.mail_id !== undefined && !deleted.has(`tmp_${m.mail_id}`)
       );
 
-      // Enrich top 5 newest messages in parallel so snippets and OTP codes appear immediately
+      // Enrich top 3 newest messages in parallel so snippets and OTP codes appear immediately
       const enriched = await Promise.all(
         list.map(async (item, idx) => {
           const rawId = String(item.mail_id);
           const id = `tmp_${rawId}`;
           const isRead = read.has(id) || item.is_new === false;
-          if (idx < 5) {
+          if (idx < 3) {
             const detail = await fetchTempMailPlusDetail(mb.a, mb.i, rawId, isRead);
             if (detail) return detail;
           }
@@ -515,15 +797,79 @@ async function fetchRemoteMessages(mb: PersistedMailboxRecord): Promise<EmailDet
           };
         })
       );
-      return enriched;
-    } catch {
-      return [];
+      return { messages: enriched };
+    } catch (err) {
+      return { messages: [], ...classifyUpstreamError(err) };
+    }
+  }
+
+  if (mb.p === 'inboxes') {
+    try {
+      const data = await fetchJson<{
+        msgs?: Array<{
+          uid?: string;
+          f?: string;
+          s?: string;
+          cr?: string;
+          r?: number;
+          ph?: string;
+        }>;
+      }>(`${INBOXES_API}/inbox/${encodeURIComponent(mb.a)}`);
+
+      const list = (data.msgs ?? []).filter(
+        (m) => Boolean(m.uid) && !deleted.has(`inb_${m.uid}`)
+      );
+
+      // Enrich at most 2 newest messages lacking OTP in preview to stay below Inboxes.com rate limit
+      let enrichBudget = 2;
+      const messages = await Promise.all(
+        list.map(async (item) => {
+          const rawUid = String(item.uid);
+          const id = `inb_${rawUid}`;
+          const isRead = read.has(id);
+          const parsedFrom = parseFromHeader(item.f || 'unknown@sender');
+          const subject = item.s || '(Không có tiêu đề)';
+          const snippet = (item.ph || subject).replace(/\s+/g, ' ').slice(0, 140);
+          const quickOtps = extractOtpCodes(`${item.ph || ''}\n${subject}`, subject);
+
+          if (quickOtps.length === 0 && enrichBudget > 0) {
+            enrichBudget--;
+            const detail = await fetchInboxesMessageDetail(mb.a, mb.i, rawUid, isRead);
+            if (detail) return detail;
+          }
+
+          const receivedAt = item.cr
+            ? parseLooseDate(item.cr)
+            : item.r
+              ? new Date(item.r > 1e12 ? item.r : item.r * 1000).toISOString()
+              : new Date().toISOString();
+          return {
+            id,
+            mailboxId: mb.i,
+            fromName: parsedFrom.name,
+            fromAddress: parsedFrom.address,
+            toAddress: mb.a,
+            subject,
+            snippet,
+            receivedAt,
+            isRead,
+            otpCodes: quickOtps,
+            textBody: item.ph || '',
+            htmlBody: '',
+            rawSource: '',
+          };
+        })
+      );
+      return { messages };
+    } catch (err) {
+      return { messages: [], ...classifyUpstreamError(err) };
     }
   }
 
   if (mb.p === 'tempmail_lol' && mb.lt) {
     try {
       const data = await fetchJson<{
+        expired?: boolean;
         emails?: Array<{
           from?: string;
           to?: string;
@@ -533,6 +879,13 @@ async function fetchRemoteMessages(mb: PersistedMailboxRecord): Promise<EmailDet
           date?: number;
         }>;
       }>(`${TEMPMAIL_LOL_API}/inbox?token=${encodeURIComponent(mb.lt)}`);
+
+      if (data.expired === true) {
+        return {
+          messages: [],
+          syncError: 'Hộp thư xoay vòng này đã hết hạn (sau 1 giờ) — hãy bấm "Tạo email" để lấy địa chỉ sạch mới.',
+        };
+      }
 
       const mapped = await Promise.all(
         (data.emails ?? []).map(async (item, idx) => {
@@ -576,13 +929,13 @@ async function fetchRemoteMessages(mb: PersistedMailboxRecord): Promise<EmailDet
           };
         })
       );
-      return mapped.filter((m) => !deleted.has(m.id));
-    } catch {
-      return [];
+      return { messages: mapped.filter((m) => !deleted.has(m.id)) };
+    } catch (err) {
+      return { messages: [], ...classifyUpstreamError(err) };
     }
   }
 
-  return [];
+  return { messages: [] };
 }
 
 async function loadMailboxFromCookies(
@@ -651,12 +1004,16 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
   try {
     // 0. GET /api/health
     if (method === 'GET' && segments.length === 1 && segments[0] === 'health') {
-      return jsonResponse({ ok: true, runtime: 'cloudflare-pages' });
+      return jsonResponse({
+        ok: true,
+        runtime: 'cloudflare-workers',
+        customDomains: getConfiguredCustomDomains(env),
+      });
     }
 
     // 1. GET /api/domains
     if (method === 'GET' && segments.length === 1 && segments[0] === 'domains') {
-      const domains = await fetchLiveDomains();
+      const domains = await fetchLiveDomains(env);
       return jsonResponse({ domains });
     }
 
@@ -678,32 +1035,55 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
         return jsonResponse({ error: 'Dữ liệu gửi lên không hợp lệ.' }, 400);
       }
 
-      const domains = await fetchLiveDomains();
-      const mailtmDomain = domains.find((d) => d.provider === 'mailtm');
-      const username = generateFakerUsername();
-
-      // Prefer clean 2-level rotating domain from Mail.tm first, then TempMail.plus
-      if (mailtmDomain) {
+      const customDomains = getConfiguredCustomDomains(env);
+      if (customDomains.length > 0) {
+        const username = generateFakerUsername();
+        const domain = customDomains[Math.floor(Math.random() * customDomains.length)];
         const payload: GeneratedEmailPreview = {
-          address: `${username}@${mailtmDomain.domain}`,
+          address: `${username}@${domain}`,
           username,
-          domain: mailtmDomain.domain,
-          provider: 'mailtm',
+          domain,
+          provider: 'cloudflare_email',
         };
         return jsonResponse(payload);
       }
 
-      const plusDomain =
-        domains[Math.floor(Math.random() * Math.max(1, domains.length))] ?? {
-          domain: 'mailto.plus',
-          provider: 'tempmail_plus' as MailProvider,
-          active: true,
+      // Default: fresh rotating community domain (un-blacklisted for strict OTP providers like Grok/xAI)
+      try {
+        const tml = await createTempMailLolAccount();
+        const [username, domain] = tml.address.split('@');
+        const pendingId = `pre_${randomHex(8)}`;
+        const pendingRecord: PendingPreviewRecord = {
+          id: pendingId,
+          address: tml.address,
+          username,
+          domain,
+          provider: 'tempmail_lol',
+          token: tml.token,
+          createdAt: Date.now(),
         };
+        const encryptedPending = await encryptCookiePayload(pendingRecord, secret);
+        const pendingCookie = buildCookieHeader(PENDING_COOKIE_NAME, encryptedPending, 900, isHttps);
+        const payload: GeneratedEmailPreview = {
+          address: tml.address,
+          username,
+          domain,
+          provider: 'tempmail_lol',
+          pregeneratedToken: pendingId,
+        };
+        return jsonResponse(payload, 200, [pendingCookie]);
+      } catch {
+        // Fallback to Mail.tm / TempMail.plus if TempMail.lol create quota is temporarily busy
+      }
+
+      const domains = await fetchLiveDomains(env);
+      const username = generateFakerUsername();
+      const picked = pickPreferredOtpDomain(domains);
       const payload: GeneratedEmailPreview = {
-        address: `${username}@${plusDomain.domain}`,
+        address: `${username}@${picked.domain}`,
         username,
-        domain: plusDomain.domain,
-        provider: plusDomain.provider,
+        domain: picked.domain,
+        provider: picked.provider,
       };
       return jsonResponse(payload);
     }
@@ -716,7 +1096,7 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
       }
 
       const mode = body.mode === 'domain' ? 'domain' : 'email';
-      const domains = await fetchLiveDomains();
+      const domains = await fetchLiveDomains(env);
       const setCookies: string[] = [];
       let created: PersistedMailboxRecord | null = null;
 
@@ -743,19 +1123,50 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
         }
       }
 
+      // Case B: Auto-create clean rotating domain when no explicit domain/full email was chosen
+      const customDomains = getConfiguredCustomDomains(env);
+      const rawUserText =
+        mode === 'email' ? (body.email ?? '').trim() : (body.username ?? '').trim();
+      const wantsCleanRotating =
+        !created &&
+        customDomains.length === 0 &&
+        !rawUserText.includes('@') &&
+        ((mode === 'email' && !rawUserText) ||
+          (mode === 'domain' && (!body.domain || body.domain === 'random')));
+
+      if (wantsCleanRotating) {
+        if (rawUserText) {
+          const checkPrefix = parseEmailInput(rawUserText, 'example.com');
+          if (!checkPrefix.valid) {
+            return jsonResponse({ error: checkPrefix.error || 'Username không hợp lệ.' }, 400);
+          }
+        }
+        try {
+          const tml = await createTempMailLolAccount(rawUserText || undefined);
+          const [tmlUser, tmlDom] = tml.address.split('@');
+          created = {
+            i: `mb_${randomHex(8)}`,
+            a: tml.address,
+            u: tmlUser,
+            d: tmlDom,
+            p: 'tempmail_lol',
+            c: new Date().toISOString(),
+            l: true,
+            lt: tml.token,
+          };
+        } catch {
+          // Fall through seamlessly to Mail.tm / TempMail.plus
+        }
+      }
+
       if (!created) {
         const rawInput =
           mode === 'email'
             ? (body.email ?? '').trim() || generateFakerUsername()
             : (body.username ?? '').trim() || generateFakerUsername();
 
-        // For random domain: prioritize clean Mail.tm domain first, then clean 2-level TempMail.plus domains
-        const mailtmDomain = domains.find((d) => d.provider === 'mailtm')?.domain;
-        const randomDomain =
-          mode === 'email' && mailtmDomain
-            ? mailtmDomain
-            : domains[Math.floor(Math.random() * Math.max(1, domains.length))]?.domain ||
-              'mailto.plus';
+        // Pick a reliable primary OTP domain (Custom CF -> Mail.tm / TempMail.plus -> Inboxes)
+        const randomDomain = pickPreferredOtpDomain(domains).domain;
 
         const fallbackDomain =
           body.domain && body.domain !== 'random' ? body.domain : randomDomain;
@@ -784,8 +1195,21 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
           Boolean(body.domain && body.domain !== 'random') &&
           Boolean(body.username?.trim() || body.email?.trim());
 
+        // Provider 0: Private Cloudflare Email Routing domain (100% real SMTP delivery, zero blocklist)
+        if (domainEntry?.provider === 'cloudflare_email' && env?.MAILBOX_KV) {
+          created = {
+            i: id,
+            a: `${username}@${requestedDomain}`,
+            u: username,
+            d: requestedDomain,
+            p: 'cloudflare_email',
+            c: new Date().toISOString(),
+            l: true,
+          };
+        }
+
         // Provider 1: Mail.tm (clean 2-level rotating .com domain)
-        if (domainEntry?.provider === 'mailtm') {
+        if (!created && domainEntry?.provider === 'mailtm') {
           try {
             const mt = await createMailTmAccount(username, requestedDomain);
             created = {
@@ -812,7 +1236,30 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
           }
         }
 
-        // Provider 2: TempMail.plus (7 clean 2-level domains, stateless across all Edge IPs)
+        // Provider 2: Inboxes.com (18+ clean 2-level .com domains, stateless across Cloudflare Edge)
+        if (!created && domainEntry?.provider === 'inboxes') {
+          const candidateAddr = `${username}@${requestedDomain}`;
+          try {
+            const check = await fetchJson<{ msgs?: unknown[] }>(
+              `${INBOXES_API}/inbox/${encodeURIComponent(candidateAddr)}`
+            );
+            if (check && Array.isArray(check.msgs)) {
+              created = {
+                i: id,
+                a: candidateAddr,
+                u: username,
+                d: requestedDomain,
+                p: 'inboxes',
+                c: new Date().toISOString(),
+                l: true,
+              };
+            }
+          } catch {
+            // Fall through to TempMail.plus
+          }
+        }
+
+        // Provider 3: TempMail.plus (7 clean 2-level domains, stateless across all Edge IPs)
         if (!created) {
           const targetPlusDomain = TEMPMAIL_PLUS_DOMAINS.includes(requestedDomain)
             ? requestedDomain
@@ -834,11 +1281,36 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
               };
             }
           } catch {
+            // Fall through to Inboxes.com fallback if not tried yet
+          }
+        }
+
+        // Provider 3b: Inboxes.com fallback when Mail.tm / TempMail.plus are unavailable
+        if (!created) {
+          const fallbackInboxes =
+            domains.find((d) => d.provider === 'inboxes')?.domain || INBOXES_FALLBACK_DOMAINS[0];
+          const candidateAddr = `${username}@${fallbackInboxes}`;
+          try {
+            const check = await fetchJson<{ msgs?: unknown[] }>(
+              `${INBOXES_API}/inbox/${encodeURIComponent(candidateAddr)}`
+            );
+            if (check && Array.isArray(check.msgs)) {
+              created = {
+                i: id,
+                a: candidateAddr,
+                u: username,
+                d: fallbackInboxes,
+                p: 'inboxes',
+                c: new Date().toISOString(),
+                l: true,
+              };
+            }
+          } catch {
             // Fall through to TempMail.lol backup
           }
         }
 
-        // Provider 3: TempMail.lol backup (token-authenticated)
+        // Provider 4: TempMail.lol backup (token-authenticated)
         if (!created) {
           try {
             const tml = await createTempMailLolAccount();
@@ -903,7 +1375,10 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
         return jsonResponse({ error: 'Không tìm thấy hộp thư.' }, 404);
       }
 
-      const remoteMessages = await fetchRemoteMessages(mb);
+      const { messages: remoteMessages, syncError, rateLimited } = await fetchRemoteMessages(
+        mb,
+        env
+      );
       const remoteUnread = remoteMessages.filter((m) => !m.isRead).length;
       const sorted = remoteMessages.sort(
         (a, b) => Date.parse(b.receivedAt) - Date.parse(a.receivedAt)
@@ -912,6 +1387,7 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
       return jsonResponse({
         mailbox: toPublicMailbox(mb, sorted.length, remoteUnread),
         messages: sorted.map(toSummary),
+        ...(syncError ? { syncError, rateLimited: Boolean(rateLimited) } : {}),
       });
     }
 
@@ -939,6 +1415,24 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
         mb.rd = Array.from(readSet);
         return [await persistMailboxCookie(mb, secret, isHttps)];
       };
+
+      // Cloudflare Email Routing (KV-backed custom domain) detail
+      if (mb.p === 'cloudflare_email' && env?.MAILBOX_KV) {
+        const rawMsg = await env.MAILBOX_KV.get(`msg:${mb.a.toLowerCase()}:${messageId}`);
+        if (rawMsg) {
+          try {
+            const parsed = JSON.parse(rawMsg) as EmailDetail;
+            const setCookies = await markReadAndPersist();
+            return jsonResponse(
+              { message: { ...parsed, mailboxId: mb.i, isRead: true } },
+              200,
+              setCookies
+            );
+          } catch {
+            // Fall through
+          }
+        }
+      }
 
       // Mail.tm detail + raw source
       if (mb.p === 'mailtm' && mb.mt) {
@@ -1025,9 +1519,19 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
         }
       }
 
+      // Inboxes.com detail
+      if (mb.p === 'inboxes' && messageId.startsWith('inb_')) {
+        const rawUid = messageId.slice(4);
+        const detail = await fetchInboxesMessageDetail(mb.a, mb.i, rawUid, true);
+        if (detail) {
+          const setCookies = await markReadAndPersist();
+          return jsonResponse({ message: detail }, 200, setCookies);
+        }
+      }
+
       // TempMail.lol detail
       if (mb.p === 'tempmail_lol' && mb.lt) {
-        const all = await fetchRemoteMessages(mb);
+        const { messages: all } = await fetchRemoteMessages(mb, env);
         const hit = all.find((m) => m.id === messageId);
         if (hit) {
           const setCookies = await markReadAndPersist();
@@ -1071,6 +1575,12 @@ export async function onRequest(context: CloudflarePagesContext): Promise<Respon
           `${TEMPMAIL_PLUS_API}/${encodeURIComponent(rawMailId)}?email=${encodeURIComponent(mb.a)}&epin=`,
           { method: 'DELETE', signal: AbortSignal.timeout(4000) }
         ).catch(() => {});
+      } else if (mb.p === 'inboxes' && messageId.startsWith('inb_')) {
+        const rawUid = messageId.slice(4);
+        fetch(`${INBOXES_API}/message/${encodeURIComponent(rawUid)}`, {
+          method: 'DELETE',
+          signal: AbortSignal.timeout(4000),
+        }).catch(() => {});
       }
 
       const updatedCookie = await persistMailboxCookie(mb, secret, isHttps);

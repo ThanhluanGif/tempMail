@@ -1,4 +1,4 @@
-export type MailProvider = 'mailtm' | 'tempmail_plus' | 'tempmail_lol';
+export type MailProvider = 'cloudflare_email' | 'mailtm' | 'tempmail_plus' | 'inboxes' | 'tempmail_lol';
 
 export type CreationMode = 'domain' | 'email';
 

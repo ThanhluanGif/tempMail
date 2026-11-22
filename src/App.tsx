@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Inbox, Mail, MailOpen } from 'lucide-react';
 import {
   ApiError,
@@ -24,10 +24,12 @@ import type {
   GeneratedEmailPreview,
   Mailbox,
 } from './types/mail';
+import { getLatestOtpForMessages, mergeInboxMessages } from './utils/tempMailLogic';
 
 type MobilePane = 'sidebar' | 'list' | 'reader';
 
-const POLL_INTERVAL_MS = 5000;
+const POLL_INTERVAL_MS = 10000;
+const BASE_DOCUMENT_TITLE = 'TempMail — Email nhận mã OTP';
 
 export default function App() {
   const [domains, setDomains] = useState<DomainInfo[]>([]);
@@ -37,6 +39,7 @@ export default function App() {
   const [selectedMailboxId, setSelectedMailboxId] = useState<string | null>(null);
 
   const [messagesByMailbox, setMessagesByMailbox] = useState<Record<string, EmailSummary[]>>({});
+  const [syncErrorByMailbox, setSyncErrorByMailbox] = useState<Record<string, string | null>>({});
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
 
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
@@ -59,6 +62,19 @@ export default function App() {
   const toastTimerRef = useRef<number | null>(null);
   const copyTimerRef = useRef<number | null>(null);
   const activeMessageRequestRef = useRef(0);
+  const seenMessageIdsRef = useRef<Record<string, Set<string>>>({});
+  const deletedMessageIdsRef = useRef<Record<string, Set<string>>>({});
+  const inFlightPollRef = useRef<Set<string>>(new Set());
+  const selectedMailboxIdRef = useRef<string | null>(null);
+  const selectedMessageIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    selectedMailboxIdRef.current = selectedMailboxId;
+  }, [selectedMailboxId]);
+
+  useEffect(() => {
+    selectedMessageIdRef.current = selectedMessageId;
+  }, [selectedMessageId]);
 
   const showToast = useCallback((message: string) => {
     setToastMessage(message);
@@ -106,25 +122,118 @@ export default function App() {
     }
   }, [showToast]);
 
+  const openMessageDetail = useCallback(
+    async (targetMailboxId: string, messageId: string, wasUnread = false) => {
+      const requestId = ++activeMessageRequestRef.current;
+      setSelectedMessageId(messageId);
+      setIsLoadingDetail(true);
+      setMobilePane('reader');
+      try {
+        const detail = await fetchMessageDetail(targetMailboxId, messageId);
+        if (activeMessageRequestRef.current !== requestId) return;
+        setSelectedMessageDetail(detail);
+        setMessagesByMailbox((prev) => ({
+          ...prev,
+          [targetMailboxId]: (prev[targetMailboxId] ?? []).map((m) =>
+            m.id === messageId ? { ...m, isRead: true, otpCodes: detail.otpCodes } : m
+          ),
+        }));
+        if (wasUnread) {
+          setMailboxes((prev) =>
+            prev
+              .filter((mb): mb is Mailbox => Boolean(mb?.id))
+              .map((mb) =>
+                mb.id === targetMailboxId
+                  ? { ...mb, unreadCount: Math.max(0, mb.unreadCount - 1) }
+                  : mb
+              )
+          );
+        }
+      } catch {
+        if (activeMessageRequestRef.current === requestId) {
+          showToast('Không thể tải nội dung thư');
+        }
+      } finally {
+        if (activeMessageRequestRef.current === requestId) {
+          setIsLoadingDetail(false);
+        }
+      }
+    },
+    [showToast]
+  );
+
   const loadMessagesForMailbox = useCallback(
     async (mailboxId: string, silent = false) => {
+      // Prevent overlapping background polls from racing and flickering OTP state
+      if (silent && inFlightPollRef.current.has(mailboxId)) return;
+      inFlightPollRef.current.add(mailboxId);
       if (!silent) setIsLoadingMessages(true);
       try {
-        const { mailbox, messages } = await fetchMessages(mailboxId);
+        const { mailbox, messages, syncError } = await fetchMessages(mailboxId);
+        if (syncError) {
+          // Preserve existing messages & OTPs on transient upstream error (429/403/timeout/expired)
+          setSyncErrorByMailbox((prev) => ({ ...prev, [mailboxId]: syncError }));
+          return;
+        }
+
+        setSyncErrorByMailbox((prev) =>
+          prev[mailboxId] ? { ...prev, [mailboxId]: null } : prev
+        );
+
+        let mergedCount = messages.length;
+        let mergedUnread = messages.filter((m) => !m.isRead).length;
+
         if (Array.isArray(messages)) {
-          setMessagesByMailbox((prev) => ({ ...prev, [mailboxId]: messages }));
+          const prevSeen = seenMessageIdsRef.current[mailboxId];
+          const isInitialSync = !prevSeen;
+          const nextSeen = new Set(prevSeen ?? []);
+          const deletedSet = deletedMessageIdsRef.current[mailboxId];
+          const newlyArrived = isInitialSync
+            ? []
+            : messages.filter((m) => !nextSeen.has(m.id) && !deletedSet?.has(m.id));
+          for (const m of messages) nextSeen.add(m.id);
+          seenMessageIdsRef.current[mailboxId] = nextSeen;
+
+          setMessagesByMailbox((prev) => {
+            const existing = prev[mailboxId] ?? [];
+            const merged = mergeInboxMessages(existing, messages, deletedSet);
+            mergedCount = merged.length;
+            mergedUnread = merged.filter((m) => !m.isRead).length;
+            return { ...prev, [mailboxId]: merged };
+          });
+
+          // Surface newly arrived OTP immediately via toast and auto-open only if reader is idle
+          const newestOtpMsg = newlyArrived.find((m) => m.otpCodes.length > 0);
+          if (newestOtpMsg) {
+            showToast(`Đã nhận mã OTP mới: ${newestOtpMsg.otpCodes[0]}`);
+            if (
+              selectedMailboxIdRef.current === mailboxId &&
+              !selectedMessageIdRef.current
+            ) {
+              void openMessageDetail(mailboxId, newestOtpMsg.id, !newestOtpMsg.isRead);
+            }
+          }
         }
         if (mailbox?.id) {
           setMailboxes((prev) =>
             prev
               .filter((mb): mb is Mailbox => Boolean(mb?.id))
-              .map((mb) => (mb.id === mailbox.id ? mailbox : mb))
+              .map((mb) =>
+                mb.id === mailbox.id
+                  ? {
+                      ...mailbox,
+                      messageCount: Math.max(mailbox.messageCount, mergedCount),
+                      unreadCount: mergedUnread,
+                    }
+                  : mb
+              )
           );
         }
         stampSyncTime();
       } catch (err) {
         if (err instanceof ApiError && err.status === 404) {
-          // Mailbox expired or server restarted — remove stale mailbox so polling stops cleanly
+          delete seenMessageIdsRef.current[mailboxId];
+          delete deletedMessageIdsRef.current[mailboxId];
           setMailboxes((prev) => {
             const remaining = prev.filter((mb) => mb?.id && mb.id !== mailboxId);
             setSelectedMailboxId((curr) =>
@@ -137,14 +246,25 @@ export default function App() {
             delete next[mailboxId];
             return next;
           });
+          setSyncErrorByMailbox((prev) => {
+            const next = { ...prev };
+            delete next[mailboxId];
+            return next;
+          });
           setSelectedMessageId(null);
           setSelectedMessageDetail(null);
+        } else {
+          setSyncErrorByMailbox((prev) => ({
+            ...prev,
+            [mailboxId]: 'Mất kết nối tạm thời khi đồng bộ thư — đang tự động thử lại.',
+          }));
         }
       } finally {
+        inFlightPollRef.current.delete(mailboxId);
         if (!silent) setIsLoadingMessages(false);
       }
     },
-    [stampSyncTime]
+    [openMessageDetail, showToast, stampSyncTime]
   );
 
   // Initial load of domains and existing session mailboxes
@@ -183,7 +303,19 @@ export default function App() {
     setIsRefreshing(true);
     try {
       const list = await fetchMailboxes();
-      setMailboxes(list);
+      setMailboxes((prev) => {
+        const prevMap = new Map(prev.map((m) => [m.id, m]));
+        return list.map((mb) => {
+          const old = prevMap.get(mb.id);
+          return old
+            ? {
+                ...mb,
+                messageCount: Math.max(mb.messageCount, old.messageCount),
+                unreadCount: Math.max(mb.unreadCount, old.unreadCount),
+              }
+            : mb;
+        });
+      });
       if (selectedMailboxId) {
         await loadMessagesForMailbox(selectedMailboxId, true);
       } else {
@@ -273,6 +405,11 @@ export default function App() {
         delete copy[mailboxId];
         return copy;
       });
+      setSyncErrorByMailbox((prev) => {
+        const copy = { ...prev };
+        delete copy[mailboxId];
+        return copy;
+      });
       showToast('Đã xóa hộp thư tạm');
     } catch {
       showToast('Không thể xóa hộp thư lúc này');
@@ -281,44 +418,10 @@ export default function App() {
 
   const handleSelectMessage = async (messageId: string) => {
     if (!selectedMailboxId) return;
-    const targetMailboxId = selectedMailboxId;
-    const requestId = ++activeMessageRequestRef.current;
-    const wasUnread = (messagesByMailbox[targetMailboxId] ?? []).some(
+    const wasUnread = (messagesByMailbox[selectedMailboxId] ?? []).some(
       (m) => m.id === messageId && !m.isRead
     );
-    setSelectedMessageId(messageId);
-    setIsLoadingDetail(true);
-    setMobilePane('reader');
-    try {
-      const detail = await fetchMessageDetail(targetMailboxId, messageId);
-      if (activeMessageRequestRef.current !== requestId) return;
-      setSelectedMessageDetail(detail);
-      setMessagesByMailbox((prev) => ({
-        ...prev,
-        [targetMailboxId]: (prev[targetMailboxId] ?? []).map((m) =>
-          m.id === messageId ? { ...m, isRead: true, otpCodes: detail.otpCodes } : m
-        ),
-      }));
-      if (wasUnread) {
-        setMailboxes((prev) =>
-          prev
-            .filter((mb): mb is Mailbox => Boolean(mb?.id))
-            .map((mb) =>
-              mb.id === targetMailboxId
-                ? { ...mb, unreadCount: Math.max(0, mb.unreadCount - 1) }
-                : mb
-            )
-        );
-      }
-    } catch {
-      if (activeMessageRequestRef.current === requestId) {
-        showToast('Không thể tải nội dung thư');
-      }
-    } finally {
-      if (activeMessageRequestRef.current === requestId) {
-        setIsLoadingDetail(false);
-      }
-    }
+    await openMessageDetail(selectedMailboxId, messageId, wasUnread);
   };
 
   const handleDeleteMessage = async (messageId: string) => {
@@ -326,6 +429,10 @@ export default function App() {
     setIsDeletingMessage(true);
     try {
       await deleteMessage(selectedMailboxId, messageId);
+      if (!deletedMessageIdsRef.current[selectedMailboxId]) {
+        deletedMessageIdsRef.current[selectedMailboxId] = new Set();
+      }
+      deletedMessageIdsRef.current[selectedMailboxId].add(messageId);
       setMessagesByMailbox((prev) => ({
         ...prev,
         [selectedMailboxId]: (prev[selectedMailboxId] ?? []).filter((m) => m.id !== messageId),
@@ -353,6 +460,23 @@ export default function App() {
   const selectedMailbox = mailboxes.find((mb) => mb.id === selectedMailboxId) ?? null;
   const activeMessages = selectedMailboxId ? messagesByMailbox[selectedMailboxId] ?? [] : [];
 
+  const latestOtpByMailbox = useMemo(() => {
+    const map: Record<string, string | undefined> = {};
+    for (const [mbId, list] of Object.entries(messagesByMailbox)) {
+      const hit = getLatestOtpForMessages(list);
+      if (hit) map[mbId] = hit.code;
+    }
+    return map;
+  }, [messagesByMailbox]);
+
+  const activeLatestOtp = selectedMailboxId ? latestOtpByMailbox[selectedMailboxId] : undefined;
+
+  useEffect(() => {
+    document.title = activeLatestOtp
+      ? `[${activeLatestOtp}] ${BASE_DOCUMENT_TITLE}`
+      : BASE_DOCUMENT_TITLE;
+  }, [activeLatestOtp]);
+
   return (
     <div className="macos-wallpaper h-dvh w-full md:p-2.5 flex items-stretch justify-center overflow-hidden">
       <div className="w-full h-full bg-white md:rounded-[12px] md:shadow-[0_12px_40px_rgba(15,23,42,0.14),0_2px_6px_rgba(15,23,42,0.06)] md:ring-1 md:ring-black/[0.08] flex flex-col overflow-hidden relative">
@@ -375,6 +499,7 @@ export default function App() {
               isLoadingDomains={isLoadingDomains}
               mailboxes={mailboxes}
               selectedMailboxId={selectedMailboxId}
+              latestOtpByMailbox={latestOtpByMailbox}
               isCreating={isCreating}
               isGenerating={isGenerating}
               formError={formError}
@@ -399,9 +524,15 @@ export default function App() {
               messages={activeMessages}
               selectedMessageId={selectedMessageId}
               isLoadingMessages={isLoadingMessages}
+              syncError={selectedMailboxId ? syncErrorByMailbox[selectedMailboxId] ?? null : null}
               copiedValue={copiedValue}
               onSelectMessage={handleSelectMessage}
               onCopyText={handleCopyText}
+              onRetrySync={() => {
+                if (selectedMailboxId) {
+                  void loadMessagesForMailbox(selectedMailboxId, false);
+                }
+              }}
             />
           </div>
 

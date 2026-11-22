@@ -8,6 +8,7 @@ interface SidebarProps {
   isLoadingDomains: boolean;
   mailboxes: Mailbox[];
   selectedMailboxId: string | null;
+  latestOtpByMailbox: Record<string, string | undefined>;
   isCreating: boolean;
   isGenerating: boolean;
   formError: string | null;
@@ -32,6 +33,7 @@ export function Sidebar({
   isLoadingDomains,
   mailboxes,
   selectedMailboxId,
+  latestOtpByMailbox,
   isCreating,
   isGenerating,
   formError,
@@ -102,7 +104,7 @@ export function Sidebar({
       <div className="p-3.5 shrink-0">
         <div className="flex items-center justify-between mb-2.5 px-0.5">
           <h2 className="text-[11px] font-semibold tracking-[0.04em] text-[#8B94A3]">
-            TẠO ĐỊA CHỈ MỚI
+            TẠO EMAIL LẤY OTP
           </h2>
           <button
             type="button"
@@ -235,12 +237,23 @@ export function Sidebar({
                   onChange={(e) => setSelectedDomain(e.target.value)}
                   className="w-full rounded-lg border border-[#D4DAE3] bg-white px-3 py-2 text-[13px] font-mono text-[#1D1D1F] focus:outline-none focus:border-[#007AFF] focus:ring-2 focus:ring-[#007AFF]/15 transition-colors cursor-pointer"
                 >
-                  <option value="random">@ Ngẫu nhiên ({domains.length} tên miền)</option>
-                  {domains.map((item) => (
-                    <option key={item.domain} value={item.domain}>
-                      @{item.domain}
-                    </option>
-                  ))}
+                  <option value="random">@ Xoay vòng sạch (Khuyên dùng)</option>
+                  {domains.map((item) => {
+                    const tierLabel =
+                      item.provider === 'cloudflare_email'
+                        ? ' (Riêng — Khuyên dùng OTP)'
+                        : item.provider === 'mailtm'
+                          ? ' (Đề xuất OTP)'
+                          : item.provider === 'tempmail_plus'
+                            ? ' (Nhanh)'
+                            : '';
+                    return (
+                      <option key={item.domain} value={item.domain}>
+                        @{item.domain}
+                        {tierLabel}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
 
@@ -273,12 +286,12 @@ export function Sidebar({
 
         {mailboxes.length === 0 ? (
           <div className="px-0.5 pt-1 text-[12.5px] text-[#8E96A4] leading-relaxed">
-            <p>Chưa có hộp thư nào.</p>
+            <p>Chưa có email lấy OTP nào.</p>
             <p className="mt-1">
-              Bấm <strong className="font-semibold text-[#5E6673]">Tạo email</strong> để tạo địa
-              chỉ đầu tiên, hoặc chuyển sang tab{' '}
-              <strong className="font-semibold text-[#5E6673]">Domain</strong> để dán địa chỉ vào ô
-              username.
+              Bấm <strong className="font-semibold text-[#5E6673]">Tạo email</strong> để tạo ngay
+              địa chỉ nhận mã xác minh, hoặc chuyển sang tab{' '}
+              <strong className="font-semibold text-[#5E6673]">Domain</strong> để chọn tên miền
+              riêng.
             </p>
           </div>
         ) : (
@@ -289,69 +302,100 @@ export function Sidebar({
             {mailboxes.map((mb) => {
               const isSelected = mb.id === selectedMailboxId;
               const isCopied = copiedValue === mb.address;
+              const latestOtp = latestOtpByMailbox[mb.id];
+              const isOtpCopied = Boolean(latestOtp && copiedValue === latestOtp);
               return (
                 <li
                   key={mb.id}
-                  className={`group flex items-center gap-1 rounded-lg border transition-all ${
+                  className={`group rounded-lg border transition-all ${
                     isSelected
                       ? 'bg-white border-[#007AFF]/35 shadow-[0_1px_2px_rgba(0,122,255,0.08)]'
                       : 'bg-transparent border-transparent hover:bg-white/70 hover:border-[#E2E7F0]'
                   }`}
                 >
-                  <button
-                    type="button"
-                    onClick={() => onSelectMailbox(mb.id)}
-                    aria-current={isSelected ? 'true' : undefined}
-                    className="flex-1 min-w-0 text-left px-2.5 py-2 cursor-pointer focus-visible:outline-2 focus-visible:outline-[#007AFF] rounded-l-lg"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span
-                        className={`font-mono text-[12.5px] truncate ${
-                          isSelected ? 'font-semibold text-[#005FCC]' : 'font-medium text-[#1D1D1F]'
-                        }`}
-                      >
-                        {mb.address}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-[#7D8696] tabular-nums">
-                      <span>{mb.messageCount} thư</span>
-                      {mb.unreadCount > 0 && (
-                        <>
-                          <span aria-hidden="true">·</span>
-                          <span className="font-semibold text-[#007AFF]">
-                            {mb.unreadCount} mới
-                          </span>
-                        </>
-                      )}
-                      <span aria-hidden="true">·</span>
-                      <span className="truncate">{mb.isLive ? 'Trực tuyến' : 'Cục bộ'}</span>
-                    </div>
-                  </button>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => onSelectMailbox(mb.id)}
+                      aria-current={isSelected ? 'true' : undefined}
+                      className="flex-1 min-w-0 text-left px-2.5 py-2 cursor-pointer focus-visible:outline-2 focus-visible:outline-[#007AFF] rounded-l-lg"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span
+                          className={`font-mono text-[12.5px] truncate ${
+                            isSelected ? 'font-semibold text-[#005FCC]' : 'font-medium text-[#1D1D1F]'
+                          }`}
+                        >
+                          {mb.address}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-[#7D8696] tabular-nums">
+                        <span>{mb.messageCount} thư</span>
+                        {mb.unreadCount > 0 && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <span className="font-semibold text-[#007AFF]">
+                              {mb.unreadCount} mới
+                            </span>
+                          </>
+                        )}
+                        <span aria-hidden="true">·</span>
+                        <span className="truncate">
+                          {mb.provider === 'cloudflare_email'
+                            ? 'Tên miền riêng · OTP'
+                            : mb.provider === 'tempmail_lol'
+                              ? 'Tên miền sạch · OTP'
+                              : 'Nhận OTP'}
+                        </span>
+                      </div>
+                    </button>
 
-                  <div className="flex items-center gap-0.5 pr-1.5 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => onCopyText(mb.address, 'Đã chép địa chỉ email')}
-                      aria-label={`Sao chép ${mb.address}`}
-                      title="Sao chép địa chỉ"
-                      className="p-1.5 rounded-md text-[#6B7280] hover:text-[#007AFF] hover:bg-[#007AFF]/10 transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-[#007AFF]"
-                    >
-                      {isCopied ? (
-                        <Check className="w-3.5 h-3.5 text-[#16A34A]" />
-                      ) : (
-                        <Copy className="w-3.5 h-3.5" />
-                      )}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onDeleteMailbox(mb.id)}
-                      aria-label={`Xóa hộp thư ${mb.address}`}
-                      title="Xóa hộp thư"
-                      className="p-1.5 rounded-md text-[#8B94A3] hover:text-[#DC2626] hover:bg-[#FEE2E2]/70 transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-[#DC2626]"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                    <div className="flex items-center gap-0.5 pr-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => onCopyText(mb.address, 'Đã chép địa chỉ email')}
+                        aria-label={`Sao chép ${mb.address}`}
+                        title="Sao chép địa chỉ"
+                        className="p-1.5 rounded-md text-[#6B7280] hover:text-[#007AFF] hover:bg-[#007AFF]/10 transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-[#007AFF]"
+                      >
+                        {isCopied ? (
+                          <Check className="w-3.5 h-3.5 text-[#16A34A]" />
+                        ) : (
+                          <Copy className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onDeleteMailbox(mb.id)}
+                        aria-label={`Xóa hộp thư ${mb.address}`}
+                        title="Xóa hộp thư"
+                        className="p-1.5 rounded-md text-[#8B94A3] hover:text-[#DC2626] hover:bg-[#FEE2E2]/70 transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-[#DC2626]"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
+
+                  {latestOtp && (
+                    <div className="px-2.5 pb-2 pt-0.5">
+                      <button
+                        type="button"
+                        onClick={() => onCopyText(latestOtp, `Đã chép mã OTP ${latestOtp}`)}
+                        aria-label={`Sao chép mã OTP ${latestOtp} của ${mb.address}`}
+                        className="w-full flex items-center justify-between gap-2 px-2 py-1 rounded-md bg-[#EEF5FF] hover:bg-[#E1EEFF] border border-[#CFE2FF] text-[11.5px] transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-[#007AFF]"
+                      >
+                        <span className="text-[#4B6B99] font-medium">OTP mới</span>
+                        <span className="inline-flex items-center gap-1.5 font-mono tabular-nums font-bold text-[#005FCC] tracking-[0.06em]">
+                          <span>{latestOtp}</span>
+                          {isOtpCopied ? (
+                            <Check className="w-3 h-3 text-[#16A34A]" />
+                          ) : (
+                            <Copy className="w-3 h-3 text-[#007AFF]" />
+                          )}
+                        </span>
+                      </button>
+                    </div>
+                  )}
                 </li>
               );
             })}

@@ -23,7 +23,7 @@ export function TitleBar({
         </div>
         <h1 className="text-[14px] tracking-[-0.01em] truncate whitespace-nowrap">
           <span className="font-semibold text-[#1D1D1F]">TempMail</span>
-          <span className="text-[#78808D] font-normal"> — Hộp thư tạm thời</span>
+          <span className="text-[#78808D] font-normal"> — Email nhận mã OTP</span>
         </h1>
       </div>
 

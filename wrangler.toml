@@ -7,3 +7,15 @@ directory = "./dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
 run_worker_first = ["/api/*"]
+
+# Optional: Enable private custom-domain OTP reception via Cloudflare Email Routing
+# 1. Create KV namespace: npx wrangler kv namespace create MAILBOX_KV
+# 2. Uncomment below & paste your KV id + custom domain(s)
+# 3. In Cloudflare Dashboard -> Email Routing -> Routing rules -> Catch-all -> Send to Worker (tempmail-studio)
+#
+# [[kv_namespaces]]
+# binding = "MAILBOX_KV"
+# id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+#
+# [vars]
+# CUSTOM_DOMAINS = "yourdomain.com"

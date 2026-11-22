@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Check, Code2, Copy, FileText, Mail, Trash2 } from 'lucide-react';
 import type { EmailDetail } from '../types/mail';
-import { formatEmailDate, getSenderInitial } from '../utils/tempMailLogic';
+import { buildSafeEmailSrcDoc, formatEmailDate, getSenderInitial } from '../utils/tempMailLogic';
 
 type ReaderViewMode = 'html' | 'text' | 'source';
 
@@ -25,10 +25,36 @@ export function MessageReader({
   onCopyText,
 }: MessageReaderProps) {
   const [viewMode, setViewMode] = useState<ReaderViewMode>('html');
+  const [iframeHeight, setIframeHeight] = useState<number>(420);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
 
   useEffect(() => {
     setViewMode('html');
+    setIframeHeight(420);
   }, [message?.id]);
+
+  const safeSrcDoc = useMemo(
+    () => (message?.htmlBody ? buildSafeEmailSrcDoc(message.htmlBody) : ''),
+    [message?.htmlBody]
+  );
+
+  const handleIframeLoad = () => {
+    const iframe = iframeRef.current;
+    if (!iframe) return;
+    try {
+      const doc = iframe.contentDocument;
+      if (!doc) return;
+      const measured = Math.max(
+        doc.body?.scrollHeight ?? 0,
+        doc.documentElement?.scrollHeight ?? 0
+      );
+      if (measured > 0) {
+        setIframeHeight(Math.min(Math.max(measured + 24, 340), 2400));
+      }
+    } catch {
+      // Fallback height stays 420px if cross-origin restricted
+    }
+  };
 
   if (isLoading) {
     return (
@@ -62,9 +88,10 @@ export function MessageReader({
         className="flex-1 min-w-0 bg-[#F5F6F8] flex flex-col items-center justify-center p-8 text-center min-h-0"
       >
         <Mail className="w-11 h-11 text-[#CBD0D8] stroke-[1.4]" aria-hidden="true" />
-        <h2 className="mt-3 text-[15px] font-semibold text-[#525864]">Không có thư nào được chọn</h2>
+        <h2 className="mt-3 text-[15px] font-semibold text-[#525864]">Chưa chọn thư OTP</h2>
         <p className="mt-1.5 text-[13px] text-[#949CA9] max-w-[290px] leading-relaxed">
-          Chọn một thư trong danh sách để đọc. Mã OTP sẽ tự được nhận diện và nổi bật để chép nhanh.
+          Chọn một thư trong danh sách để đọc. Mã OTP sẽ tự động tách nổi bật ở đầu thư để sao chép
+          nhanh chỉ với 1 chạm.
         </p>
       </main>
     );
@@ -156,40 +183,68 @@ export function MessageReader({
         <div className="max-w-3xl mx-auto space-y-4">
           {/* Auto-detected OTP Banner */}
           {primaryOtp && (
-            <div className="bg-white rounded-xl border border-[#007AFF]/30 px-4 py-3.5 flex flex-wrap items-center justify-between gap-3 shadow-[0_1px_3px_rgba(0,122,255,0.08)]">
-              <div className="min-w-0">
-                <p className="text-[12px] font-medium text-[#525866]">
-                  Mã xác nhận (OTP) được phát hiện tự động
-                </p>
-                <div className="flex flex-wrap items-center gap-3 mt-1">
-                  {message.otpCodes.map((code) => (
-                    <span
-                      key={code}
-                      className="font-mono tabular-nums text-[24px] font-bold tracking-[0.14em] text-[#0066D6]"
+            <div className="bg-white rounded-xl border border-[#007AFF]/35 px-4 py-3.5 shadow-[0_1px_3px_rgba(0,122,255,0.08)] space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-[12px] font-medium text-[#525866]">
+                    Mã xác nhận (OTP) được phát hiện tự động
+                  </p>
+                  <div className="mt-1.5 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => onCopyText(primaryOtp, `Đã chép mã OTP ${primaryOtp}`)}
+                      title={`Nhấn để chép mã ${primaryOtp}`}
+                      className="inline-flex items-center px-3 py-1 rounded-lg bg-[#F0F7FF] hover:bg-[#E2EFFF] border border-[#CFE2FF] transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-[#007AFF]"
                     >
-                      {code}
-                    </span>
-                  ))}
+                      <span className="font-mono tabular-nums text-[22px] sm:text-[24px] font-bold tracking-[0.14em] text-[#005FCC] select-all">
+                        {primaryOtp}
+                      </span>
+                    </button>
+                  </div>
                 </div>
+
+                <button
+                  type="button"
+                  onClick={() => onCopyText(primaryOtp, `Đã chép mã OTP ${primaryOtp}`)}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#007AFF] hover:bg-[#0068D9] text-white text-[13px] font-semibold shadow-[0_1px_2px_rgba(0,122,255,0.28)] transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#007AFF]"
+                >
+                  {copiedValue === primaryOtp ? (
+                    <>
+                      <Check className="w-4 h-4" />
+                      <span>Đã chép mã</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>Chép mã {primaryOtp}</span>
+                    </>
+                  )}
+                </button>
               </div>
 
-              <button
-                type="button"
-                onClick={() => onCopyText(primaryOtp, `Đã chép mã OTP ${primaryOtp}`)}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#007AFF] hover:bg-[#0068D9] text-white text-[13px] font-semibold shadow-[0_1px_2px_rgba(0,122,255,0.28)] transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#007AFF]"
-              >
-                {copiedValue === primaryOtp ? (
-                  <>
-                    <Check className="w-4 h-4" />
-                    <span>Đã chép mã</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-3.5 h-3.5" />
-                    <span>Chép mã {primaryOtp}</span>
-                  </>
-                )}
-              </button>
+              {message.otpCodes.length > 1 && (
+                <div className="pt-2 border-t border-[#EEF2F7] flex flex-wrap items-center gap-1.5">
+                  <span className="text-[11.5px] text-[#7D8696] mr-1">Mã khác trong thư:</span>
+                  {message.otpCodes.slice(1, 5).map((code) => {
+                    const isThisCopied = copiedValue === code;
+                    return (
+                      <button
+                        key={code}
+                        type="button"
+                        onClick={() => onCopyText(code, `Đã chép mã ${code}`)}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-[#F4F7FB] hover:bg-[#E7F0FF] border border-[#DCE5F2] text-[12px] font-mono tabular-nums font-semibold text-[#1D4ED8] transition-colors cursor-pointer"
+                      >
+                        <span>{code}</span>
+                        {isThisCopied ? (
+                          <Check className="w-3 h-3 text-[#16A34A]" />
+                        ) : (
+                          <Copy className="w-3 h-3 text-[#007AFF]" />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 
@@ -208,38 +263,46 @@ export function MessageReader({
                     <p className="text-[15px] font-semibold text-[#1D1D1F] truncate">
                       {message.fromName}
                     </p>
-                    <span className="text-[12px] text-[#7D8696] font-mono tabular-nums">
+                    <span className="text-[12px] text-[#7D8696] font-mono tabular-nums shrink-0">
                       Ngày: {formatEmailDate(message.receivedAt)}
                     </span>
                   </div>
-                  <p className="text-[12.5px] font-mono text-[#6B7280] truncate mt-0.5">
+                  <p className="text-[12.5px] font-mono text-[#6B7280] break-all mt-0.5">
                     {message.fromAddress}
                   </p>
                 </div>
               </div>
 
-              <dl className="mt-3.5 pt-3 border-t border-[#F2F4F7] grid grid-cols-1 sm:grid-cols-2 gap-y-1.5 gap-x-4 text-[12.5px]">
-                <div className="flex items-baseline gap-1.5 min-w-0">
-                  <dt className="text-[#8E95A2] shrink-0">Tiêu đề:</dt>
-                  <dd className="font-semibold text-[#1D1D1F] break-words">{message.subject}</dd>
+              <dl className="mt-3.5 pt-3 border-t border-[#F2F4F7] space-y-1.5 text-[12.5px]">
+                <div className="flex items-baseline gap-2 min-w-0">
+                  <dt className="text-[#8E95A2] shrink-0 w-14">Tiêu đề:</dt>
+                  <dd className="font-semibold text-[#1D1D1F] break-words min-w-0 flex-1">
+                    {message.subject}
+                  </dd>
                 </div>
-                <div className="flex items-baseline gap-1.5 min-w-0">
-                  <dt className="text-[#8E95A2] shrink-0">Đến:</dt>
-                  <dd className="font-mono text-[#374151] truncate" title={message.toAddress}>
+                <div className="flex items-baseline gap-2 min-w-0">
+                  <dt className="text-[#8E95A2] shrink-0 w-14">Đến:</dt>
+                  <dd
+                    className="font-mono text-[#374151] break-all min-w-0 flex-1"
+                    title={message.toAddress}
+                  >
                     {message.toAddress}
                   </dd>
                 </div>
               </dl>
             </div>
 
-            {/* Safe Body View */}
-            {activeView === 'html' && message.htmlBody ? (
-              <div className="bg-white">
+            {/* Safe Responsive Body View */}
+            {activeView === 'html' && safeSrcDoc ? (
+              <div className="bg-white overflow-x-auto">
                 <iframe
+                  ref={iframeRef}
                   title={`Nội dung thư: ${message.subject}`}
-                  sandbox=""
-                  srcDoc={message.htmlBody}
-                  className="w-full min-h-[420px] border-0 bg-white block"
+                  sandbox="allow-same-origin"
+                  srcDoc={safeSrcDoc}
+                  onLoad={handleIframeLoad}
+                  style={{ height: `${iframeHeight}px` }}
+                  className="w-full border-0 bg-white block"
                 />
               </div>
             ) : activeView === 'source' ? (
@@ -257,12 +320,12 @@ export function MessageReader({
                     <span>Chép nguồn</span>
                   </button>
                 </div>
-                <pre className="p-5 text-[12px] font-mono text-[#334155] overflow-x-auto whitespace-pre-wrap leading-relaxed">
+                <pre className="p-5 text-[12px] font-mono text-[#334155] overflow-x-auto whitespace-pre-wrap break-words leading-relaxed">
                   {message.rawSource || message.textBody}
                 </pre>
               </div>
             ) : (
-              <pre className="p-5 text-[14px] text-[#272B33] whitespace-pre-wrap font-sans leading-relaxed">
+              <pre className="p-5 text-[14px] text-[#272B33] whitespace-pre-wrap break-words font-sans leading-relaxed">
                 {message.textBody || '(Thư không có nội dung văn bản)'}
               </pre>
             )}
