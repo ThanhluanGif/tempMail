@@ -1,32 +1,424 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
-import { createServer as createViteServer } from 'vite';
-import type {
-  CreateMailboxPayload,
-  DomainInfo,
-  EmailDetail,
-  EmailSummary,
-  GeneratedEmailPreview,
-  Mailbox,
-  MailProvider,
-} from './src/types/mail';
-import {
-  buildSampleTestEmail,
-  extractOtpCodes,
-  generateFakerUsername,
-  parseEmailInput,
-  sanitizeEmailHtml,
-  stripHtmlToText,
-} from './src/utils/tempMailLogic';
+
+type MailProvider = 'mailtm' | 'tempmail_lol' | 'guerrilla' | 'local';
+
+interface DomainInfo {
+  domain: string;
+  provider: MailProvider;
+  active: boolean;
+}
+
+interface Mailbox {
+  id: string;
+  address: string;
+  username: string;
+  domain: string;
+  provider: MailProvider;
+  createdAt: string;
+  messageCount: number;
+  unreadCount: number;
+  isLive: boolean;
+}
+
+interface EmailSummary {
+  id: string;
+  mailboxId: string;
+  fromName: string;
+  fromAddress: string;
+  toAddress: string;
+  subject: string;
+  snippet: string;
+  receivedAt: string;
+  isRead: boolean;
+  otpCodes: string[];
+  isSample?: boolean;
+}
+
+interface EmailDetail extends EmailSummary {
+  textBody: string;
+  htmlBody: string;
+  rawSource: string;
+}
+
+interface CreateMailboxPayload {
+  mode: 'domain' | 'email';
+  username?: string;
+  domain?: string;
+  email?: string;
+  pregeneratedToken?: string;
+}
+
+interface GeneratedEmailPreview {
+  address: string;
+  username: string;
+  domain: string;
+  provider: MailProvider;
+  pregeneratedToken?: string;
+}
+
+interface ParsedEmailInput {
+  valid: boolean;
+  username?: string;
+  domain?: string;
+  error?: string;
+}
+
+interface SampleEmailContent {
+  fromName: string;
+  fromAddress: string;
+  subject: string;
+  receivedAt: string;
+  textBody: string;
+  htmlBody: string;
+  rawSource: string;
+}
+
+function parseValidPort(value: string | undefined): number | null {
+  if (!value) return null;
+  const num = Number(value);
+  if (Number.isInteger(num) && num > 0 && num < 65536) return num;
+  return null;
+}
+
+function resolveServerPort(
+  argv: string[],
+  env: Record<string, string | undefined>
+): number {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--port' && argv[i + 1]) {
+      const cliPort = parseValidPort(argv[i + 1]);
+      if (cliPort !== null) return cliPort;
+    } else if (arg.startsWith('--port=')) {
+      const cliPort = parseValidPort(arg.slice('--port='.length));
+      if (cliPort !== null) return cliPort;
+    }
+  }
+
+  const envPort = parseValidPort(env.PORT);
+  const nginxPort = parseValidPort(env.NGINX_PORT);
+  const defaultAppPort = parseValidPort(env.DEFAULT_APP_PORT);
+
+  if (nginxPort !== null && (envPort === null || envPort === nginxPort)) {
+    return defaultAppPort ?? 3000;
+  }
+
+  if (envPort !== null) {
+    return envPort;
+  }
+
+  return defaultAppPort ?? 3000;
+}
+
+function shouldServeStaticDist(input: {
+  execArgv: string[];
+  env: Record<string, string | undefined>;
+  hasBuiltDist: boolean;
+}): boolean {
+  if (!input.hasBuiltDist) return false;
+  if (input.env.NODE_ENV === 'production') return true;
+  if (input.env.npm_lifecycle_event === 'start') return true;
+
+  const isTsxRuntime = input.execArgv.some((arg) => arg.includes('tsx'));
+  const isDevLifecycle = input.env.npm_lifecycle_event === 'dev';
+  if (isDevLifecycle || isTsxRuntime) return false;
+
+  return true;
+}
+
+const ADJECTIVES = [
+  'minh', 'linh', 'khang', 'vayi', 'nora', 'tuan', 'huy', 'anh', 'vy', 'khoa',
+  'thao', 'nam', 'son', 'mai', 'bao', 'duc', 'quang', 'ha', 'phuc', 'ngoc',
+];
+const NOUNS = [
+  'xaf', 'nova', 'mail', 'cloud', 'box', 'dev', 'tech', 'sky', 'zen', 'wave',
+  'arc', 'flux', 'mint', 'spark', 'core', 'line', 'leaf', 'star', 'rio', 'neo',
+];
+const USERNAME_RE = /^[a-z0-9](?:[a-z0-9._-]{0,46}[a-z0-9])?$/i;
+const FULL_EMAIL_RE = /^([a-z0-9](?:[a-z0-9._-]{0,46}[a-z0-9])?)@([a-z0-9.-]+\.[a-z]{2,})$/i;
+
+function generateFakerUsername(): string {
+  const partA = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
+  const partB = NOUNS[Math.floor(Math.random() * NOUNS.length)];
+  const digits = Math.floor(100 + Math.random() * 900);
+  return `${partA}${partB}${digits}`.toLowerCase();
+}
+
+function parseEmailInput(rawInput: string, selectedDomain?: string): ParsedEmailInput {
+  const trimmed = rawInput.trim().toLowerCase();
+  if (!trimmed) {
+    return { valid: false, error: 'Vui lòng nhập username hoặc bấm tạo ngẫu nhiên.' };
+  }
+  if (trimmed.includes('@')) {
+    const match = trimmed.match(FULL_EMAIL_RE);
+    if (!match) {
+      return { valid: false, error: 'Địa chỉ email không hợp lệ. Vui lòng kiểm tra lại định dạng.' };
+    }
+    return { valid: true, username: match[1], domain: match[2] };
+  }
+  if (trimmed.length < 3) {
+    return { valid: false, error: 'Username phải có ít nhất 3 ký tự.' };
+  }
+  if (!USERNAME_RE.test(trimmed)) {
+    return {
+      valid: false,
+      error: 'Username chỉ được chứa chữ cái, chữ số, dấu chấm, gạch dưới hoặc gạch ngang.',
+    };
+  }
+  if (!selectedDomain) {
+    return { valid: false, error: 'Vui lòng chọn một tên miền hợp lệ.' };
+  }
+  return { valid: true, username: trimmed, domain: selectedDomain.trim().toLowerCase() };
+}
+
+function stripHtmlToText(input: string): string {
+  return input
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isLikelyOtp(code: string): boolean {
+  if (!code) return false;
+  if (/^(?:19|20)\d{2}$/.test(code)) return false;
+  if (code.length <= 4 && /^(\d)\1+$/.test(code)) return false;
+  return true;
+}
+
+function extractOtpCodes(content: string, subject = ''): string[] {
+  const combined = `${subject}\n${stripHtmlToText(content)}`;
+  const candidates = new Set<string>();
+  const cleaned = combined
+    .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, ' ')
+    .replace(/\b\d{1,4}[-/.]\d{1,2}[-/.]\d{2,4}\b/g, ' ')
+    .replace(/#[0-9a-fA-F]{3,8}\b/g, ' ')
+    .replace(/\b(?:CA|NY|TX|FL|WA)\s+\d{5}(?:-\d{4})?\b/g, ' ');
+
+  const contextualPatterns: RegExp[] = [
+    /(?:mã\s*(?:xác\s*nhận|xác\s*minh|bảo\s*mật|otp|đăng\s*nhập|kích\s*hoạt)|verification\s*code|confirmation\s*code|security\s*code|passcode|one-time\s*code|login\s*code|otp)\s*(?:là|của\s*bạn\s*là|is|:|-|–)?\s*(?:[A-Z]-)?(\d{4,8})\b/gi,
+    /\b([A-Z]{1,2}-\d{5,8})\b/g,
+    /\b(\d{4,8})\s+(?:là\s+mã|is\s+your\s+(?:verification|confirmation|security|login|otp)\s+code)/gi,
+  ];
+
+  for (const regex of contextualPatterns) {
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(cleaned)) !== null) {
+      const code = (match[1] ?? '').trim();
+      if (isLikelyOtp(code)) candidates.add(code);
+    }
+  }
+
+  if (candidates.size === 0 && /(?:otp|xác\s*nhận|xác\s*minh|verify|confirm|code|mã)/i.test(cleaned)) {
+    const standaloneRegex = /\b(\d{6})\b/g;
+    let match: RegExpExecArray | null;
+    while ((match = standaloneRegex.exec(cleaned)) !== null) {
+      if (isLikelyOtp(match[1])) candidates.add(match[1]);
+    }
+  }
+
+  return Array.from(candidates);
+}
+
+function sanitizeEmailHtml(rawHtml: string): string {
+  if (!rawHtml) return '';
+  let html = rawHtml;
+  html = html.replace(/<script[\s\S]*?<\/script>/gi, '');
+  html = html.replace(/<iframe[\s\S]*?<\/iframe>/gi, '');
+  html = html.replace(/<object[\s\S]*?<\/object>/gi, '');
+  html = html.replace(/<embed[\s\S]*?>/gi, '');
+  html = html.replace(/<form[\s\S]*?<\/form>/gi, '');
+  html = html.replace(/<meta[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*>/gi, '');
+  html = html.replace(/<base[^>]*>/gi, '');
+  html = html.replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+  html = html.replace(
+    /\b(href|src)\s*=\s*(["'])\s*(?:javascript|vbscript|data):[\s\S]*?\2/gi,
+    '$1=$2#$2'
+  );
+  html = html.replace(
+    /\b(href|src)\s*=\s*(?:javascript|vbscript|data):[^\s>]+/gi,
+    '$1="#"'
+  );
+  return html;
+}
+
+function buildSampleTestEmail(
+  recipientAddress: string,
+  variantIndex = 0,
+  nowIso: string = new Date().toISOString()
+): SampleEmailContent {
+  const idx = Math.abs(variantIndex) % 3;
+  if (idx === 0) {
+    const otp = '620252';
+    const subject = 'Xác nhận email cho Tài khoản Meta mới';
+    const fromName = 'Meta';
+    const fromAddress = 'security@account.meta.com';
+    const textBody = [
+      'Meta',
+      '',
+      'Vui lòng xác nhận email cho tài khoản Meta mới của bạn bằng cách nhập mã xác nhận sau đây.',
+      '',
+      'Mã xác nhận',
+      otp,
+      '',
+      'Nếu bạn không yêu cầu mã xác nhận, hãy bỏ qua thông báo này.',
+      '',
+      '© Meta. Meta Platforms, Inc., Attention: Community Support, 1 Meta Way, Menlo Park, CA 94025',
+      `Thư này đã được gửi đến ${recipientAddress}. Để góp phần bảo mật trang cá nhân của bạn, vui lòng không chuyển tiếp email này.`,
+    ].join('\n');
+    const htmlBody = `<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { margin: 0; padding: 28px 20px; background: #ffffff; color: #1c1e21; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; }
+    .container { max-width: 560px; margin: 0 auto; }
+    .brand { display: flex; align-items: center; gap: 8px; font-size: 20px; font-weight: 700; color: #1c2b33; padding-bottom: 18px; border-bottom: 1px solid #e5e7eb; margin-bottom: 24px; }
+    .brand-mark { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 8px; background: #0064e0; color: #ffffff; font-size: 15px; font-weight: 700; }
+    .lead { font-size: 15px; color: #1c2b33; margin: 0 0 20px; }
+    .code-label { font-size: 13px; color: #606770; margin-bottom: 8px; font-weight: 600; }
+    .code-box { display: inline-block; padding: 14px 24px; background: #f0f4f9; border: 1px solid #d5e1f2; border-radius: 10px; font-size: 28px; font-weight: 700; letter-spacing: 6px; color: #0064e0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin-bottom: 20px; }
+    .note { font-size: 14px; color: #4b5563; margin: 0 0 28px; }
+    .footer { border-top: 1px solid #e5e7eb; padding-top: 16px; font-size: 12px; color: #6b7280; line-height: 1.55; }
+    .footer p { margin: 0 0 8px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="brand"><span class="brand-mark">M</span><span>Meta</span></div>
+    <p class="lead">Vui lòng xác nhận email cho tài khoản Meta mới của bạn bằng cách nhập mã xác nhận sau đây.</p>
+    <div class="code-label">Mã xác nhận</div>
+    <div class="code-box">${otp}</div>
+    <p class="note">Nếu bạn không yêu cầu mã xác nhận, hãy bỏ qua thông báo này.</p>
+    <div class="footer">
+      <p>© Meta. Meta Platforms, Inc., Attention: Community Support, 1 Meta Way, Menlo Park, CA 94025</p>
+      <p>Thư này đã được gửi đến <strong>${recipientAddress}</strong>. Để góp phần bảo mật trang cá nhân của bạn, vui lòng không chuyển tiếp email này.</p>
+    </div>
+  </div>
+</body>
+</html>`;
+    const rawSource = [
+      `Delivered-To: ${recipientAddress}`,
+      `From: "${fromName}" <${fromAddress}>`,
+      `To: <${recipientAddress}>`,
+      `Date: ${new Date(nowIso).toUTCString()}`,
+      `Subject: ${subject}`,
+      `Message-ID: <meta-verify-${Date.now()}@account.meta.com>`,
+      `MIME-Version: 1.0`,
+      `Content-Type: text/plain; charset="UTF-8"`,
+      ``,
+      textBody,
+    ].join('\r\n');
+    return { fromName, fromAddress, subject, receivedAt: nowIso, textBody, htmlBody, rawSource };
+  }
+
+  if (idx === 1) {
+    const otp = '482917';
+    const subject = '[GitHub] Mã xác minh thiết bị đăng nhập mới';
+    const fromName = 'GitHub';
+    const fromAddress = 'noreply@github.com';
+    const textBody = [
+      'Chào bạn,',
+      '',
+      'Chúng tôi phát hiện yêu cầu đăng nhập vào tài khoản GitHub từ một thiết bị mới.',
+      `Mã xác minh của bạn là: ${otp}`,
+      '',
+      'Mã này sẽ hết hạn sau 15 phút. Nếu không phải bạn thực hiện, vui lòng bỏ qua email này.',
+    ].join('\n');
+    const htmlBody = `<!doctype html>
+<html lang="vi">
+<head><meta charset="utf-8" /><style>
+  body { margin: 0; padding: 28px 20px; background: #fff; color: #1f2328; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.6; }
+  .wrap { max-width: 540px; margin: 0 auto; }
+  .code { font-family: ui-monospace, monospace; font-size: 26px; font-weight: 700; letter-spacing: 5px; background: #f6f8fa; border: 1px solid #d0d7de; padding: 14px 22px; border-radius: 8px; display: inline-block; margin: 14px 0; }
+  .muted { color: #656d76; font-size: 13px; }
+</style></head>
+<body>
+  <div class="wrap">
+    <h2 style="margin:0 0 12px;font-size:18px;">Xác minh thiết bị GitHub</h2>
+    <p>Chúng tôi phát hiện yêu cầu đăng nhập từ thiết bị mới cho địa chỉ <strong>${recipientAddress}</strong>.</p>
+    <div class="code">${otp}</div>
+    <p class="muted">Mã xác minh có hiệu lực trong 15 phút. Không chia sẻ mã này cho bất kỳ ai.</p>
+  </div>
+</body>
+</html>`;
+    const rawSource = [
+      `Delivered-To: ${recipientAddress}`,
+      `From: "${fromName}" <${fromAddress}>`,
+      `To: <${recipientAddress}>`,
+      `Date: ${new Date(nowIso).toUTCString()}`,
+      `Subject: ${subject}`,
+      `MIME-Version: 1.0`,
+      `Content-Type: text/plain; charset="UTF-8"`,
+      ``,
+      textBody,
+    ].join('\r\n');
+    return { fromName, fromAddress, subject, receivedAt: nowIso, textBody, htmlBody, rawSource };
+  }
+
+  const otp = '739104';
+  const subject = 'Notion — Mã đăng nhập một lần của bạn';
+  const fromName = 'Notion';
+  const fromAddress = 'notify@mail.notion.so';
+  const textBody = [
+    'Xin chào,',
+    '',
+    `Mã đăng nhập tạm thời của bạn là ${otp}.`,
+    'Nhập mã này vào cửa sổ trình duyệt để tiếp tục vào không gian làm việc Notion.',
+  ].join('\n');
+  const htmlBody = `<!doctype html>
+<html lang="vi">
+<head><meta charset="utf-8" /><style>
+  body { margin: 0; padding: 28px 20px; background: #fff; color: #2f3437; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.6; }
+  .wrap { max-width: 540px; margin: 0 auto; }
+  .code { font-family: ui-monospace, monospace; font-size: 26px; font-weight: 700; letter-spacing: 5px; background: #f7f6f3; border: 1px solid #e3e2de; padding: 14px 22px; border-radius: 8px; display: inline-block; margin: 14px 0; }
+</style></head>
+<body>
+  <div class="wrap">
+    <h2 style="margin:0 0 12px;font-size:18px;">Đăng nhập vào Notion</h2>
+    <p>Sử dụng mã OTP bên dưới để hoàn tất đăng nhập cho <strong>${recipientAddress}</strong>:</p>
+    <div class="code">${otp}</div>
+    <p style="font-size:13px;color:#787774;">Nếu bạn không yêu cầu đăng nhập, bạn có thể an toàn bỏ qua thư này.</p>
+  </div>
+</body>
+</html>`;
+  const rawSource = [
+    `Delivered-To: ${recipientAddress}`,
+    `From: "${fromName}" <${fromAddress}>`,
+    `To: <${recipientAddress}>`,
+    `Date: ${new Date(nowIso).toUTCString()}`,
+    `Subject: ${subject}`,
+    `MIME-Version: 1.0`,
+    `Content-Type: text/plain; charset="UTF-8"`,
+    ``,
+    textBody,
+  ].join('\r\n');
+  return { fromName, fromAddress, subject, receivedAt: nowIso, textBody, htmlBody, rawSource };
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = Number(process.env.PORT) || 3000;
-const IS_PROD = process.env.NODE_ENV === 'production';
+const PORT = resolveServerPort(process.argv, process.env);
+const DIST_DIR = path.resolve(__dirname, 'dist');
+const HAS_BUILT_DIST = fs.existsSync(path.join(DIST_DIR, 'index.html'));
+const SERVE_STATIC_DIST = shouldServeStaticDist({
+  execArgv: process.execArgv,
+  env: process.env,
+  hasBuiltDist: HAS_BUILT_DIST,
+});
 const REQUEST_TIMEOUT_MS = 7000;
 
 const MAILTM_API = 'https://api.mail.tm';
@@ -92,7 +484,11 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const body = await response.text().catch(() => '');
-    throw new Error(`HTTP ${response.status}: ${body.slice(0, 180)}`);
+    const err = new Error(`HTTP ${response.status}: ${body.slice(0, 180)}`) as Error & {
+      status?: number;
+    };
+    err.status = response.status;
+    throw err;
   }
   return (await response.json()) as T;
 }
@@ -419,16 +815,25 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '64kb' }));
 
+  const wrapAsync =
+    (fn: (req: express.Request, res: express.Response, next: express.NextFunction) => Promise<void> | void) =>
+    (req: express.Request, res: express.Response, next: express.NextFunction) => {
+      Promise.resolve(fn(req, res, next)).catch(next);
+    };
+
   // 1. GET /api/domains — Live domains list
-  app.get('/api/domains', async (req, res) => {
-    try {
-      const force = req.query.refresh === '1';
-      const domains = await fetchLiveDomains(force);
-      res.json({ domains });
-    } catch {
-      res.status(502).json({ error: 'Không thể tải danh sách tên miền.' });
-    }
-  });
+  app.get(
+    '/api/domains',
+    wrapAsync(async (req, res) => {
+      try {
+        const force = req.query.refresh === '1';
+        const domains = await fetchLiveDomains(force);
+        res.json({ domains });
+      } catch {
+        res.status(502).json({ error: 'Không thể tải danh sách tên miền.' });
+      }
+    })
+  );
 
   // 2. GET /api/mailboxes — List active mailboxes in current server session
   app.get('/api/mailboxes', (_req, res) => {
@@ -439,52 +844,61 @@ async function startServer() {
   });
 
   // 3. POST /api/mailboxes/generate — Generate a fresh email address preview
-  app.post('/api/mailboxes/generate', async (req, res) => {
-    cleanupPendingGenerated();
-    const mode = req.body?.mode === 'domain' ? 'domain' : 'email';
+  app.post(
+    '/api/mailboxes/generate',
+    wrapAsync(async (req, res) => {
+      cleanupPendingGenerated();
+      const mode = req.body?.mode === 'domain' ? 'domain' : 'email';
 
-    if (mode === 'email') {
-      // Try TempMail.lol first for instant unique system email address
-      try {
-        const created = await createTempMailLolAccount();
-        const [username, domain] = created.address.split('@');
-        const previewId = crypto.randomBytes(12).toString('hex');
-        pendingGenerated.set(previewId, {
-          address: created.address,
-          username,
-          domain,
-          provider: 'tempmail_lol',
-          token: created.token,
-          createdAt: Date.now(),
-        });
-        const payload: GeneratedEmailPreview = {
-          address: created.address,
-          username,
-          domain,
-          provider: 'tempmail_lol',
-          pregeneratedToken: previewId,
-        };
-        res.json(payload);
-        return;
-      } catch {
-        // Fall through to Mail.tm / GuerrillaMail preview
+      if (mode === 'email') {
+        // Try TempMail.lol first for instant unique system email address
+        try {
+          const created = await createTempMailLolAccount();
+          const [username, domain] = created.address.split('@');
+          const previewId = crypto.randomBytes(12).toString('hex');
+          pendingGenerated.set(previewId, {
+            address: created.address,
+            username,
+            domain,
+            provider: 'tempmail_lol',
+            token: created.token,
+            createdAt: Date.now(),
+          });
+          const payload: GeneratedEmailPreview = {
+            address: created.address,
+            username,
+            domain,
+            provider: 'tempmail_lol',
+            pregeneratedToken: previewId,
+          };
+          res.json(payload);
+          return;
+        } catch {
+          // Fall through to Mail.tm / GuerrillaMail preview
+        }
       }
-    }
 
-    const domains = await fetchLiveDomains();
-    const preferred = domains[0] ?? { domain: 'sharklasers.com', provider: 'guerrilla' as MailProvider, active: true };
-    const username = generateFakerUsername();
-    const payload: GeneratedEmailPreview = {
-      address: `${username}@${preferred.domain}`,
-      username,
-      domain: preferred.domain,
-      provider: preferred.provider,
-    };
-    res.json(payload);
-  });
+      const domains = await fetchLiveDomains();
+      const preferred = domains[0] ?? {
+        domain: 'sharklasers.com',
+        provider: 'guerrilla' as MailProvider,
+        active: true,
+      };
+      const username = generateFakerUsername();
+      const payload: GeneratedEmailPreview = {
+        address: `${username}@${preferred.domain}`,
+        username,
+        domain: preferred.domain,
+        provider: preferred.provider,
+      };
+      res.json(payload);
+    })
+  );
 
   // 4. POST /api/mailboxes — Create and activate a real disposable mailbox
-  app.post('/api/mailboxes', async (req, res) => {
+  app.post(
+    '/api/mailboxes',
+    wrapAsync(async (req, res) => {
     cleanupPendingGenerated();
     const body = (req.body ?? {}) as CreateMailboxPayload;
     const mode = body.mode === 'domain' ? 'domain' : 'email';
@@ -571,6 +985,10 @@ async function startServer() {
       }
 
       const id = `mb_${crypto.randomBytes(8).toString('hex')}`;
+      const isExplicitMailTm =
+        domainEntry?.provider === 'mailtm' &&
+        Boolean(body.domain && body.domain !== 'random') &&
+        Boolean(body.username?.trim() || body.email?.trim());
 
       if (domainEntry?.provider === 'mailtm') {
         try {
@@ -592,14 +1010,22 @@ async function startServer() {
             lastKnownRemoteCount: 0,
             lastKnownRemoteUnread: 0,
           };
-        } catch {
-          // If username taken on mail.tm or rate limited, retry with suffix or fallback
+        } catch (err) {
+          const status = (err as { status?: number })?.status;
+          if (status === 422 && isExplicitMailTm) {
+            res.status(409).json({
+              error: `Địa chỉ ${username}@${requestedDomain} đã được sử dụng. Hãy đổi username khác hoặc chọn tên miền khác.`,
+            });
+            return;
+          }
+          // Otherwise fall through to live GuerrillaMail so the inbox can still receive real mail
         }
       }
 
-      if (!createdMailbox && (domainEntry?.provider === 'guerrilla' || !domainEntry)) {
+      if (!createdMailbox) {
         try {
-          const targetDomain = domainEntry ? requestedDomain : 'sharklasers.com';
+          const targetDomain =
+            domainEntry?.provider === 'guerrilla' ? requestedDomain : 'sharklasers.com';
           const gm = await createGuerrillaAccount(username, targetDomain);
           const [gmUser, gmDom] = gm.address.split('@');
           createdMailbox = {
@@ -619,7 +1045,7 @@ async function startServer() {
             lastKnownRemoteUnread: 0,
           };
         } catch {
-          // Final resilient fallback so app remains usable even if upstream APIs rate-limit
+          // Final resilient fallback only when every live provider is unreachable
         }
       }
 
@@ -644,10 +1070,13 @@ async function startServer() {
 
     mailboxes.set(createdMailbox.id, createdMailbox);
     res.status(201).json({ mailbox: toPublicMailbox(createdMailbox) });
-  });
+    })
+  );
 
   // 5. DELETE /api/mailboxes/:id — Remove mailbox
-  app.delete('/api/mailboxes/:id', async (req, res) => {
+  app.delete(
+    '/api/mailboxes/:id',
+    wrapAsync(async (req, res) => {
     const id = req.params.id;
     if (!SAFE_ID_RE.test(id)) {
       res.status(400).json({ error: 'ID hộp thư không hợp lệ.' });
@@ -669,44 +1098,50 @@ async function startServer() {
 
     mailboxes.delete(id);
     res.json({ deleted: true, id });
-  });
+    })
+  );
 
   // 6. GET /api/mailboxes/:id/messages — Poll live & local messages
-  app.get('/api/mailboxes/:id/messages', async (req, res) => {
-    const id = req.params.id;
-    if (!SAFE_ID_RE.test(id)) {
-      res.status(400).json({ error: 'ID hộp thư không hợp lệ.' });
-      return;
-    }
-    const mb = mailboxes.get(id);
-    if (!mb) {
-      res.status(404).json({ error: 'Không tìm thấy hộp thư.' });
-      return;
-    }
+  app.get(
+    '/api/mailboxes/:id/messages',
+    wrapAsync(async (req, res) => {
+      const id = req.params.id;
+      if (!SAFE_ID_RE.test(id)) {
+        res.status(400).json({ error: 'ID hộp thư không hợp lệ.' });
+        return;
+      }
+      const mb = mailboxes.get(id);
+      if (!mb) {
+        res.status(404).json({ error: 'Không tìm thấy hộp thư.' });
+        return;
+      }
 
-    const remoteMessages = await fetchRemoteMessages(mb);
-    mb.lastKnownRemoteCount = remoteMessages.length;
-    mb.lastKnownRemoteUnread = remoteMessages.filter((m) => !m.isRead).length;
+      const remoteMessages = await fetchRemoteMessages(mb);
+      mb.lastKnownRemoteCount = remoteMessages.length;
+      mb.lastKnownRemoteUnread = remoteMessages.filter((m) => !m.isRead).length;
 
-    const activeLocal = mb.localMessages
-      .filter((m) => !mb.deletedMessageIds.has(m.id))
-      .map((m) => ({
-        ...m,
-        isRead: mb.readMessageIds.has(m.id),
-      }));
+      const activeLocal = mb.localMessages
+        .filter((m) => !mb.deletedMessageIds.has(m.id))
+        .map((m) => ({
+          ...m,
+          isRead: mb.readMessageIds.has(m.id),
+        }));
 
-    const merged = [...activeLocal, ...remoteMessages].sort(
-      (a, b) => Date.parse(b.receivedAt) - Date.parse(a.receivedAt)
-    );
+      const merged = [...activeLocal, ...remoteMessages].sort(
+        (a, b) => Date.parse(b.receivedAt) - Date.parse(a.receivedAt)
+      );
 
-    res.json({
-      mailbox: toPublicMailbox(mb),
-      messages: merged.map(toSummary),
-    });
-  });
+      res.json({
+        mailbox: toPublicMailbox(mb),
+        messages: merged.map(toSummary),
+      });
+    })
+  );
 
   // 7. GET /api/mailboxes/:id/messages/:messageId — Read full email detail & source
-  app.get('/api/mailboxes/:id/messages/:messageId', async (req, res) => {
+  app.get(
+    '/api/mailboxes/:id/messages/:messageId',
+    wrapAsync(async (req, res) => {
     const { id, messageId } = req.params;
     if (!SAFE_ID_RE.test(id) || !SAFE_ID_RE.test(messageId)) {
       res.status(400).json({ error: 'Tham số không hợp lệ.' });
@@ -878,40 +1313,44 @@ async function startServer() {
     }
 
     res.status(404).json({ error: 'Không tìm thấy thư.' });
-  });
+    })
+  );
 
   // 8. DELETE /api/mailboxes/:id/messages/:messageId — Delete a message
-  app.delete('/api/mailboxes/:id/messages/:messageId', async (req, res) => {
-    const { id, messageId } = req.params;
-    if (!SAFE_ID_RE.test(id) || !SAFE_ID_RE.test(messageId)) {
-      res.status(400).json({ error: 'Tham số không hợp lệ.' });
-      return;
-    }
-    const mb = mailboxes.get(id);
-    if (!mb) {
-      res.status(404).json({ error: 'Không tìm thấy hộp thư.' });
-      return;
-    }
+  app.delete(
+    '/api/mailboxes/:id/messages/:messageId',
+    wrapAsync(async (req, res) => {
+      const { id, messageId } = req.params;
+      if (!SAFE_ID_RE.test(id) || !SAFE_ID_RE.test(messageId)) {
+        res.status(400).json({ error: 'Tham số không hợp lệ.' });
+        return;
+      }
+      const mb = mailboxes.get(id);
+      if (!mb) {
+        res.status(404).json({ error: 'Không tìm thấy hộp thư.' });
+        return;
+      }
 
-    mb.deletedMessageIds.add(messageId);
-    mb.localMessages = mb.localMessages.filter((m) => m.id !== messageId);
+      mb.deletedMessageIds.add(messageId);
+      mb.localMessages = mb.localMessages.filter((m) => m.id !== messageId);
 
-    if (mb.provider === 'mailtm' && mb.mailtmToken && !messageId.startsWith('sample_')) {
-      fetch(`${MAILTM_API}/messages/${encodeURIComponent(messageId)}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${mb.mailtmToken}` },
-        signal: AbortSignal.timeout(4000),
-      }).catch(() => {});
-    } else if (mb.provider === 'guerrilla' && mb.guerrillaSid && messageId.startsWith('gm_')) {
-      const rawId = messageId.slice(3);
-      fetch(
-        `${GUERRILLA_API}?f=del_email&email_ids[]=${encodeURIComponent(rawId)}&sid_token=${encodeURIComponent(mb.guerrillaSid)}`,
-        { signal: AbortSignal.timeout(4000) }
-      ).catch(() => {});
-    }
+      if (mb.provider === 'mailtm' && mb.mailtmToken && !messageId.startsWith('sample_')) {
+        fetch(`${MAILTM_API}/messages/${encodeURIComponent(messageId)}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${mb.mailtmToken}` },
+          signal: AbortSignal.timeout(4000),
+        }).catch(() => {});
+      } else if (mb.provider === 'guerrilla' && mb.guerrillaSid && messageId.startsWith('gm_')) {
+        const rawId = messageId.slice(3);
+        fetch(
+          `${GUERRILLA_API}?f=del_email&email_ids[]=${encodeURIComponent(rawId)}&sid_token=${encodeURIComponent(mb.guerrillaSid)}`,
+          { signal: AbortSignal.timeout(4000) }
+        ).catch(() => {});
+      }
 
-    res.json({ deleted: true, messageId });
-  });
+      res.json({ deleted: true, messageId });
+    })
+  );
 
   // 9. POST /api/mailboxes/:id/test-email — Deliver a realistic OTP test email (Meta 620252, GitHub, Notion)
   app.post('/api/mailboxes/:id/test-email', (req, res) => {
@@ -952,20 +1391,35 @@ async function startServer() {
     res.status(201).json({ message: toSummary(detail), mailbox: toPublicMailbox(mb) });
   });
 
+  // Healthcheck endpoints (use /api/health on Cloud Run since /healthz is reserved by Google Frontend)
+  app.get('/api/health', (_req, res) => {
+    res.status(200).json({
+      ok: true,
+      mode: SERVE_STATIC_DIST ? 'static' : 'vite-dev',
+      node: process.version,
+    });
+  });
+  app.get('/healthz', (_req, res) => {
+    res.status(200).json({ ok: true });
+  });
+
   // Ensure unmatched /api/* routes always return JSON rather than SPA index.html
   app.use('/api', (_req, res) => {
     res.status(404).json({ error: 'API endpoint không tồn tại.' });
   });
 
-  if (IS_PROD) {
-    const distDir = path.resolve(__dirname, 'dist');
-    app.use(express.static(distDir));
+  if (SERVE_STATIC_DIST) {
+    app.use(express.static(DIST_DIR));
     app.get('*', (_req, res) => {
-      res.sendFile(path.join(distDir, 'index.html'));
+      res.sendFile(path.join(DIST_DIR, 'index.html'));
     });
   } else {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === 'true' ? false : undefined,
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -984,10 +1438,63 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`TempMail server running at http://localhost:${PORT}`);
+  // Global JSON error handler (catches invalid JSON bodies & async route errors safely)
+  app.use(
+    (
+      err: unknown,
+      req: express.Request,
+      res: express.Response,
+      _next: express.NextFunction
+    ) => {
+      const status =
+        typeof (err as { status?: unknown })?.status === 'number'
+          ? ((err as { status: number }).status)
+          : 500;
+      if (req.originalUrl.startsWith('/api')) {
+        res.status(status >= 400 && status < 600 ? status : 500).json({
+          error: status === 400 ? 'Dữ liệu gửi lên không hợp lệ.' : 'Đã xảy ra lỗi trên máy chủ.',
+        });
+        return;
+      }
+      res.status(500).send('Internal Server Error');
+    }
+  );
+
+  const fallbackPort = parseValidPort(process.env.DEFAULT_APP_PORT) ?? 3000;
+  const httpServer = http.createServer(app);
+  let activePort = PORT;
+  let retriedFallback = false;
+
+  httpServer.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE' && !retriedFallback && activePort !== fallbackPort) {
+      retriedFallback = true;
+      activePort = fallbackPort;
+      console.warn(
+        `Port ${PORT} is already in use; retrying on fallback port ${fallbackPort}...`
+      );
+      httpServer.listen(activePort, '0.0.0.0');
+      return;
+    }
+    console.error('Server listen error:', err);
+    process.exit(1);
   });
+
+  httpServer.listen(activePort, '0.0.0.0', () => {
+    console.log(
+      `TempMail server running at http://0.0.0.0:${activePort} (${SERVE_STATIC_DIST ? 'static' : 'vite-dev'}, node ${process.version})`
+    );
+  });
+
+  const shutdown = () => {
+    httpServer.close(() => process.exit(0));
+  };
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
 }
+
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection:', reason);
+});
 
 startServer().catch((err) => {
   console.error('Failed to start server:', err);

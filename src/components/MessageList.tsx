@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Check, Copy, Mail, Search, Send } from 'lucide-react';
 import type { EmailSummary, Mailbox } from '../types/mail';
 import { formatShortTime, getSenderInitial } from '../utils/tempMailLogic';
@@ -27,6 +27,10 @@ export function MessageList({
   onSendSampleEmail,
 }: MessageListProps) {
   const [searchQuery, setSearchQuery] = useState('');
+
+  useEffect(() => {
+    setSearchQuery('');
+  }, [selectedMailbox?.id]);
 
   const filteredMessages = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();

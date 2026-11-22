@@ -7,8 +7,18 @@ import type {
   Mailbox,
 } from '../types/mail';
 
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
+    credentials: 'same-origin',
     ...init,
     headers: {
       Accept: 'application/json',
@@ -26,11 +36,11 @@ async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
       data && typeof data === 'object' && typeof (data as { error?: unknown }).error === 'string'
         ? (data as { error: string }).error
         : `Yêu cầu thất bại (HTTP ${response.status}).`;
-    throw new Error(errMsg);
+    throw new ApiError(errMsg, response.status);
   }
 
   if (!isJson || data === null || typeof data !== 'object') {
-    throw new Error('Phản hồi từ máy chủ không hợp lệ.');
+    throw new ApiError('Phản hồi từ máy chủ không hợp lệ.', response.status);
   }
 
   return data as T;

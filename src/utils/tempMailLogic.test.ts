@@ -10,6 +10,8 @@ import {
   parseEmailInput,
   sanitizeEmailHtml,
 } from './tempMailLogic';
+import { resolveServerPort, shouldServeStaticDist } from './serverConfig';
+import { onRequest as cfApiHandler } from '../../functions/api/[[path]]';
 
 test('extractOtpCodes detects Meta Vietnamese verification code 620252 and ignores postal code 94025', () => {
   const metaBody = `
@@ -105,4 +107,201 @@ test('buildSampleTestEmail produces Meta 620252 verification email by default', 
   assert.equal(sample.subject, 'Xác nhận email cho Tài khoản Meta mới');
   assert.deepEqual(extractOtpCodes(sample.textBody, sample.subject), ['620252']);
   assert.ok(sample.rawSource.includes('Delivered-To: vayixaf693@forims.com'));
+});
+
+test('resolveServerPort avoids Nginx port 8080 collision while supporting standalone Cloud Run and CLI flags', () => {
+  // AI Studio / Cloud Run container with Nginx on 8080 proxying to DEFAULT_APP_PORT=3000
+  assert.equal(
+    resolveServerPort(['node', 'server.ts'], {
+      PORT: '8080',
+      NGINX_PORT: '8080',
+      DEFAULT_APP_PORT: '3000',
+    }),
+    3000
+  );
+
+  // Nginx owns PORT even if DEFAULT_APP_PORT is missing
+  assert.equal(
+    resolveServerPort(['node', 'server.ts'], {
+      PORT: '8080',
+      NGINX_PORT: '8080',
+    }),
+    3000
+  );
+
+  // Standalone Cloud Run without Nginx uses injected PORT=8080
+  assert.equal(
+    resolveServerPort(['node', 'server.ts'], {
+      PORT: '8080',
+    }),
+    8080
+  );
+
+  // Standalone Cloud Run with stray DEFAULT_APP_PORT=3000 (no NGINX_PORT) STILL binds PORT=8080
+  assert.equal(
+    resolveServerPort(['node', 'server.ts'], {
+      PORT: '8080',
+      DEFAULT_APP_PORT: '3000',
+    }),
+    8080
+  );
+
+  // Explicit CLI --port flag overrides env vars
+  assert.equal(
+    resolveServerPort(['node', 'server.ts', '--port', '3099'], {
+      PORT: '8080',
+      DEFAULT_APP_PORT: '3000',
+    }),
+    3099
+  );
+  assert.equal(
+    resolveServerPort(['node', 'server.ts', '--port=4100'], {
+      PORT: '8080',
+    }),
+    4100
+  );
+
+  // Local default when no env vars exist
+  assert.equal(resolveServerPort(['node', 'server.ts'], {}), 3000);
+});
+
+test('shouldServeStaticDist serves dist/ under node server.ts even with NODE_ENV=development, but keeps Vite in tsx dev', () => {
+  // Deployed container running `node server.ts` even if NODE_ENV=development is inherited
+  assert.equal(
+    shouldServeStaticDist({
+      argv: ['node', 'server.ts'],
+      execArgv: [],
+      env: { NODE_ENV: 'development' },
+      hasBuiltDist: true,
+    }),
+    true
+  );
+
+  // Dev server running `npm run dev` via tsx keeps Vite middleware
+  assert.equal(
+    shouldServeStaticDist({
+      argv: ['node', 'server.ts', '--port', '3000'],
+      execArgv: ['--require', '/app/node_modules/tsx/dist/preflight.cjs'],
+      env: { NODE_ENV: 'development', npm_lifecycle_event: 'dev' },
+      hasBuiltDist: true,
+    }),
+    false
+  );
+
+  // Missing dist/ falls back to Vite instead of crashing
+  assert.equal(
+    shouldServeStaticDist({
+      argv: ['node', 'server.ts'],
+      execArgv: [],
+      env: { NODE_ENV: 'production' },
+      hasBuiltDist: false,
+    }),
+    false
+  );
+});
+
+test('Cloudflare Pages Functions handler supports stateless encrypted HttpOnly cookie lifecycle end-to-end', async () => {
+  const env = { MAILBOX_SESSION_SECRET: 'unit-test-secret-32-bytes-key-abc' };
+  const cookieJar = new Map<string, string>();
+
+  const callCf = async (method: string, path: string, body?: unknown) => {
+    const cookieHeader = Array.from(cookieJar.entries())
+      .map(([k, v]) => `${k}=${v}`)
+      .join('; ');
+    const headers = new Headers({ Accept: 'application/json' });
+    if (cookieHeader) headers.set('Cookie', cookieHeader);
+    if (body !== undefined) headers.set('Content-Type', 'application/json');
+
+    const req = new Request(`https://tempmail.pages.dev${path}`, {
+      method,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    const res = await cfApiHandler({ request: req, env, params: {} });
+
+    const setCookies =
+      typeof res.headers.getSetCookie === 'function'
+        ? res.headers.getSetCookie()
+        : res.headers.get('set-cookie')
+          ? [res.headers.get('set-cookie')!]
+          : [];
+    for (const sc of setCookies) {
+      const [pair] = sc.split(';');
+      const eq = pair.indexOf('=');
+      if (eq === -1) continue;
+      const name = pair.slice(0, eq).trim();
+      const val = pair.slice(eq + 1).trim();
+      if (sc.includes('Max-Age=0') || !val) {
+        cookieJar.delete(name);
+      } else {
+        cookieJar.set(name, val);
+      }
+    }
+
+    const json = (await res.json()) as Record<string, unknown>;
+    return { status: res.status, json, setCookies };
+  };
+
+  // 1. Health check
+  const health = await callCf('GET', '/api/health');
+  assert.equal(health.status, 200);
+  assert.equal(health.json.ok, true);
+  assert.equal(health.json.runtime, 'cloudflare-pages');
+
+  // 2. Create mailbox (uses real upstream or falls back cleanly) & verify HttpOnly encrypted cookie
+  const created = await callCf('POST', '/api/mailboxes', {
+    mode: 'domain',
+    username: 'cfedgeuser99',
+    domain: 'sharklasers.com',
+  });
+  assert.equal(created.status, 201);
+  const mailbox = created.json.mailbox as { id: string; address: string };
+  assert.ok(mailbox.id.startsWith('mb_'));
+  assert.ok(mailbox.address.includes('@'));
+  // Ensure credentials are not leaked in response JSON and cookie is HttpOnly + Secure
+  assert.equal((mailbox as Record<string, unknown>).guerrillaSid, undefined);
+  assert.equal((mailbox as Record<string, unknown>).mailtmToken, undefined);
+  assert.ok(created.setCookies.some((c) => c.includes('HttpOnly') && c.includes('Secure')));
+
+  // 3. List mailboxes across stateless request via Cookie header
+  const listed = await callCf('GET', '/api/mailboxes');
+  assert.equal(listed.status, 200);
+  const listArr = listed.json.mailboxes as Array<{ id: string }>;
+  assert.ok(listArr.some((m) => m.id === mailbox.id));
+
+  // 4. Send Meta 620252 test email & read it back
+  const sampleRes = await callCf('POST', `/api/mailboxes/${mailbox.id}/test-email`, {});
+  assert.equal(sampleRes.status, 201);
+  const sampleMsg = sampleRes.json.message as { id: string; otpCodes: string[] };
+  assert.deepEqual(sampleMsg.otpCodes, ['620252']);
+
+  const inbox = await callCf('GET', `/api/mailboxes/${mailbox.id}/messages`);
+  assert.equal(inbox.status, 200);
+  const msgs = inbox.json.messages as Array<{ id: string; isRead: boolean }>;
+  assert.ok(msgs.some((m) => m.id === sampleMsg.id && !m.isRead));
+
+  const detail = await callCf('GET', `/api/mailboxes/${mailbox.id}/messages/${sampleMsg.id}`);
+  assert.equal(detail.status, 200);
+  assert.equal((detail.json.message as { isRead: boolean }).isRead, true);
+
+  // 5. Delete message & verify removal
+  const delMsg = await callCf('DELETE', `/api/mailboxes/${mailbox.id}/messages/${sampleMsg.id}`);
+  assert.equal(delMsg.status, 200);
+
+  const inboxAfterDel = await callCf('GET', `/api/mailboxes/${mailbox.id}/messages`);
+  const msgsAfterDel = inboxAfterDel.json.messages as Array<{ id: string }>;
+  assert.ok(!msgsAfterDel.some((m) => m.id === sampleMsg.id));
+
+  // 6. Delete mailbox & verify cookie expiration + 404
+  const delMb = await callCf('DELETE', `/api/mailboxes/${mailbox.id}`);
+  assert.equal(delMb.status, 200);
+  assert.equal(cookieJar.has(`tm_m_${mailbox.id}`), false);
+
+  const missing = await callCf('GET', `/api/mailboxes/${mailbox.id}/messages`);
+  assert.equal(missing.status, 404);
+
+  // 7. Unknown API route returns JSON 404
+  const unknown = await callCf('GET', '/api/nonexistent');
+  assert.equal(unknown.status, 404);
+  assert.equal(typeof unknown.json.error, 'string');
 });

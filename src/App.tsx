@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Inbox, Mail, MailOpen } from 'lucide-react';
 import {
+  ApiError,
   createMailbox,
   deleteMailbox,
   deleteMessage,
@@ -59,6 +60,7 @@ export default function App() {
 
   const toastTimerRef = useRef<number | null>(null);
   const copyTimerRef = useRef<number | null>(null);
+  const activeMessageRequestRef = useRef(0);
 
   const showToast = useCallback((message: string) => {
     setToastMessage(message);
@@ -122,8 +124,24 @@ export default function App() {
           );
         }
         stampSyncTime();
-      } catch {
-        // Keep last known messages if a background poll fails transiently
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 404) {
+          // Mailbox expired or server restarted — remove stale mailbox so polling stops cleanly
+          setMailboxes((prev) => {
+            const remaining = prev.filter((mb) => mb?.id && mb.id !== mailboxId);
+            setSelectedMailboxId((curr) =>
+              curr === mailboxId ? (remaining[0]?.id ?? null) : curr
+            );
+            return remaining;
+          });
+          setMessagesByMailbox((prev) => {
+            const next = { ...prev };
+            delete next[mailboxId];
+            return next;
+          });
+          setSelectedMessageId(null);
+          setSelectedMessageDetail(null);
+        }
       } finally {
         if (!silent) setIsLoadingMessages(false);
       }
@@ -265,29 +283,43 @@ export default function App() {
 
   const handleSelectMessage = async (messageId: string) => {
     if (!selectedMailboxId) return;
+    const targetMailboxId = selectedMailboxId;
+    const requestId = ++activeMessageRequestRef.current;
+    const wasUnread = (messagesByMailbox[targetMailboxId] ?? []).some(
+      (m) => m.id === messageId && !m.isRead
+    );
     setSelectedMessageId(messageId);
     setIsLoadingDetail(true);
     setMobilePane('reader');
     try {
-      const detail = await fetchMessageDetail(selectedMailboxId, messageId);
+      const detail = await fetchMessageDetail(targetMailboxId, messageId);
+      if (activeMessageRequestRef.current !== requestId) return;
       setSelectedMessageDetail(detail);
       setMessagesByMailbox((prev) => ({
         ...prev,
-        [selectedMailboxId]: (prev[selectedMailboxId] ?? []).map((m) =>
+        [targetMailboxId]: (prev[targetMailboxId] ?? []).map((m) =>
           m.id === messageId ? { ...m, isRead: true, otpCodes: detail.otpCodes } : m
         ),
       }));
-      setMailboxes((prev) =>
-        prev.map((mb) =>
-          mb.id === selectedMailboxId
-            ? { ...mb, unreadCount: Math.max(0, mb.unreadCount - 1) }
-            : mb
-        )
-      );
+      if (wasUnread) {
+        setMailboxes((prev) =>
+          prev
+            .filter((mb): mb is Mailbox => Boolean(mb?.id))
+            .map((mb) =>
+              mb.id === targetMailboxId
+                ? { ...mb, unreadCount: Math.max(0, mb.unreadCount - 1) }
+                : mb
+            )
+        );
+      }
     } catch {
-      showToast('Không thể tải nội dung thư');
+      if (activeMessageRequestRef.current === requestId) {
+        showToast('Không thể tải nội dung thư');
+      }
     } finally {
-      setIsLoadingDetail(false);
+      if (activeMessageRequestRef.current === requestId) {
+        setIsLoadingDetail(false);
+      }
     }
   };
 

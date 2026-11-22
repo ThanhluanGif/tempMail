@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ArrowLeft, Check, Code2, Copy, FileText, Mail, Trash2 } from 'lucide-react';
 import type { EmailDetail } from '../types/mail';
 import { formatEmailDate, getSenderInitial } from '../utils/tempMailLogic';
@@ -25,6 +25,10 @@ export function MessageReader({
   onCopyText,
 }: MessageReaderProps) {
   const [viewMode, setViewMode] = useState<ReaderViewMode>('html');
+
+  useEffect(() => {
+    setViewMode('html');
+  }, [message?.id]);
 
   if (isLoading) {
     return (
